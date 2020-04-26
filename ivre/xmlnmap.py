@@ -17,11 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
 
-"""
-This module is part of IVRE.
-Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
-
-This sub-module contains the parser for nmap's XML output files.
+"""This sub-module contains the parser for nmap's XML output files.
 
 """
 
@@ -41,7 +37,7 @@ from past.builtins import basestring
 
 
 from ivre import utils
-from ivre.analyzer import ike
+from ivre.analyzer import dicom, ike
 
 
 SCHEMA_VERSION = 16
@@ -1353,7 +1349,7 @@ results.
                 tuple(column_width))
     output.append(line_fmt % dict((t, t.upper()) for t in title))
     for fobj in files:
-        output.append(line_fmt % dict(size="-", time="-", **fobj))
+        output.append(line_fmt % dict({"size": "-", "time": "-"}, **fobj))
     output.append("")
     return {
         'id': 'http-ls', 'output': '\n'.join(output),
@@ -1766,7 +1762,7 @@ argument (a dict object).
                                     humankey,
                                     data[masscankey],
                                 ))
-                    scripts = []
+                    scripts = self._curport.setdefault('scripts', [])
                     if 'time' in data:
                         smb2_time = {}
                         smb2_time_out = ['']
@@ -1803,10 +1799,6 @@ argument (a dict object).
                         'smb-os-discovery': smb_os_disco,
                         'output': '\n'.join(smb_os_disco_output),
                         'masscan': masscan_data,
-                    })
-                    self._curhost.setdefault('ports', []).append({
-                        'port': -1,
-                        'scripts': scripts,
                     })
                     return
                 # create fake scripts from masscan "service" tags
@@ -1853,18 +1845,37 @@ argument (a dict object).
                                 'masscan'
                             ] = masscan_data
                         return
+                    # tcp/dicom: use our own parser
+                    if self._curport['protocol'] == 'tcp' and \
+                       probe == 'dicom':
+                        masscan_data = script["masscan"]
+                        self._curport.update(dicom.parse_message(raw_output))
+                        if self._curport.get('service_name') == 'dicom':
+                            self._curport['scripts'][0][
+                                'masscan'
+                            ] = masscan_data
+                        return
                     if self._curport.get('service_name') in ['ftp', 'imap',
                                                              'pop3', 'smtp',
                                                              'ssh']:
                         raw_output = raw_output.split(
                             b'\n', 1
                         )[0].rstrip(b'\r')
-                    match = utils.match_nmap_svc_fp(
+                    new_match = utils.match_nmap_svc_fp(
                         output=raw_output,
                         proto=self._curport['protocol'],
                         probe=probe,
+                        soft=True,
                     )
+                    if new_match and (not match or
+                                      (match.get('soft') and
+                                       not new_match.get('soft'))):
+                        match = new_match
                 if match:
+                    try:
+                        del match['soft']
+                    except KeyError:
+                        pass
                     self._curport.update(match)
                 return
             for attr in attrs.keys():

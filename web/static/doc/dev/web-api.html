@@ -21,10 +21,10 @@
   
     
       <script type="text/javascript" id="documentation_options" data-url_root="../" src="../_static/documentation_options.js"></script>
-        <script type="text/javascript" src="../_static/jquery.js"></script>
-        <script type="text/javascript" src="../_static/underscore.js"></script>
-        <script type="text/javascript" src="../_static/doctools.js"></script>
-        <script type="text/javascript" src="../_static/language_data.js"></script>
+        <script src="../_static/jquery.js"></script>
+        <script src="../_static/underscore.js"></script>
+        <script src="../_static/doctools.js"></script>
+        <script src="../_static/language_data.js"></script>
     
     <script type="text/javascript" src="../_static/js/theme.js"></script>
 
@@ -176,7 +176,7 @@
             
   <div class="section" id="web-api">
 <h1>Web API<a class="headerlink" href="#web-api" title="Permalink to this headline">¶</a></h1>
-<dl class="get">
+<dl class="http get">
 <dt id="get--config">
 <code class="sig-name descname">GET </code><code class="sig-name descname">/config</code><a class="headerlink" href="#get--config" title="Permalink to this definition">¶</a></dt>
 <dd><p>Returns JavaScript code to set client-side configuration values</p>
@@ -195,7 +195,7 @@
 </dl>
 </dd></dl>
 
-<dl class="get">
+<dl class="http get">
 <dt id="get--(subdb-re-scans|view)-(action-re-onlyips|ipsports|timeline|coordinates|countopenports|diffcats)">
 <code class="sig-name descname">GET </code><code class="sig-name descname">/(subdb:re:scans|view)/(action:re:onlyips|ipsports|timeline|coordinates|countopenports|diffcats)</code><a class="headerlink" href="#get--(subdb-re-scans|view)-(action-re-onlyips|ipsports|timeline|coordinates|countopenports|diffcats)" title="Permalink to this definition">¶</a></dt>
 <dd><p>Get special values from Nmap &amp; View databases</p>
@@ -217,7 +217,7 @@ format)</p></li>
 strings</p></li>
 <li><p><strong>datesasstrings</strong> (<em>bool</em>) – to get dates as strings rather than as
 timestamps</p></li>
-<li><p><strong>format</strong> (<em>str</em>) – “json” (the default) or “txt”</p></li>
+<li><p><strong>format</strong> (<em>str</em>) – “json” (the default), “ndjson” or “txt”</p></li>
 </ul>
 </dd>
 <dt class="field-odd">Status Codes</dt>
@@ -234,7 +234,7 @@ timestamps</p></li>
 </dl>
 </dd></dl>
 
-<dl class="get">
+<dl class="http get">
 <dt id="get--(subdb-re-scans|view)-count">
 <code class="sig-name descname">GET </code><code class="sig-name descname">/(subdb:re:scans|view)/count</code><a class="headerlink" href="#get--(subdb-re-scans|view)-count" title="Permalink to this definition">¶</a></dt>
 <dd><p>Get special values from Nmap &amp; View databases</p>
@@ -264,7 +264,7 @@ timestamps</p></li>
 </dl>
 </dd></dl>
 
-<dl class="get">
+<dl class="http get">
 <dt id="get--(subdb-re-scans|view)-top-(field-path)">
 <code class="sig-name descname">GET </code><code class="sig-name descname">/(subdb:re:scans|view)/top/</code><span class="sig-paren">(</span><em class="property">field: </em><em class="sig-param">path</em><span class="sig-paren">)</span><a class="headerlink" href="#get--(subdb-re-scans|view)-top-(field-path)" title="Permalink to this definition">¶</a></dt>
 <dd><p>Get top values from Nmap &amp; View databases</p>
@@ -283,6 +283,7 @@ timestamps</p></li>
 strings</p></li>
 <li><p><strong>datesasstrings</strong> (<em>bool</em>) – to get dates as strings rather than as
 timestamps</p></li>
+<li><p><strong>format</strong> (<em>str</em>) – “json” (the default) or “ndjson”</p></li>
 </ul>
 </dd>
 <dt class="field-odd">Status Codes</dt>
@@ -300,7 +301,7 @@ timestamps</p></li>
 </dl>
 </dd></dl>
 
-<dl class="get">
+<dl class="http get">
 <dt id="get--(subdb-re-scans|view)">
 <code class="sig-name descname">GET </code><code class="sig-name descname">/(subdb:re:scans|view)</code><a class="headerlink" href="#get--(subdb-re-scans|view)" title="Permalink to this definition">¶</a></dt>
 <dd><p>Get records from Nmap &amp; View databases</p>
@@ -318,6 +319,7 @@ timestamps</p></li>
 strings</p></li>
 <li><p><strong>datesasstrings</strong> (<em>bool</em>) – to get dates as strings rather than as
 timestamps</p></li>
+<li><p><strong>format</strong> (<em>str</em>) – “json” (the default) or “ndjson”</p></li>
 </ul>
 </dd>
 <dt class="field-odd">Status Codes</dt>
@@ -334,7 +336,7 @@ timestamps</p></li>
 </dl>
 </dd></dl>
 
-<dl class="post">
+<dl class="http post">
 <dt id="post--(subdb-re-scans|view)">
 <code class="sig-name descname">POST </code><code class="sig-name descname">/(subdb:re:scans|view)</code><a class="headerlink" href="#post--(subdb-re-scans|view)" title="Permalink to this definition">¶</a></dt>
 <dd><p>Add records to Nmap &amp; View databases</p>
@@ -365,7 +367,7 @@ timestamps</p></li>
 </dl>
 </dd></dl>
 
-<dl class="get">
+<dl class="http get">
 <dt id="get--flows">
 <code class="sig-name descname">GET </code><code class="sig-name descname">/flows</code><a class="headerlink" href="#get--flows" title="Permalink to this definition">¶</a></dt>
 <dd><p>Get special values from Nmap &amp; View databases</p>
@@ -391,7 +393,7 @@ timestamps</p></li>
 </dl>
 </dd></dl>
 
-<dl class="get">
+<dl class="http get">
 <dt id="get--ipdata-(addr)">
 <code class="sig-name descname">GET </code><code class="sig-name descname">/ipdata/</code><span class="sig-paren">(</span><em class="sig-param">addr</em><span class="sig-paren">)</span><a class="headerlink" href="#get--ipdata-(addr)" title="Permalink to this definition">¶</a></dt>
 <dd><p>Returns (estimated) geographical and AS data for a given IP address.</p>
@@ -420,7 +422,7 @@ timestamps</p></li>
 </dl>
 </dd></dl>
 
-<dl class="get">
+<dl class="http get">
 <dt id="get--passivedns-(query)">
 <code class="sig-name descname">GET </code><code class="sig-name descname">/passivedns/</code><span class="sig-paren">(</span><em class="sig-param">query</em><span class="sig-paren">)</span><a class="headerlink" href="#get--passivedns-(query)" title="Permalink to this definition">¶</a></dt>
 <dd><p>Query passive DNS data. This API is compatible with the <a class="reference external" href="https://datatracker.ietf.org/doc/draft-dulaunoy-dnsop-passive-dns-cof/">Common

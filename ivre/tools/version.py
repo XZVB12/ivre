@@ -38,12 +38,18 @@ def main():
     print()
     print("Python %s" % sys.version)
     print()
-    print(' '.join(str(elt) for elt in os.uname()))
+    try:
+        print(' '.join(str(elt) for elt in os.uname()))
+    except AttributeError:
+        # Windows OS don't have os.uname()
+        print(sys.platform)
     print()
     print("Dependencies:")
-    for module in ['Crypto', 'pymongo', 'py2neo', 'sqlalchemy', 'psycopg2',
-                   'krbV', 'PIL', 'MySQLdb', 'dbus', 'matplotlib', 'bottle',
-                   'OpenSSL', 'tinydb']:
+    for module in [
+            'pymongo', 'py2neo', 'sqlalchemy', 'psycopg2', 'cryptography',
+            'krbV', 'PIL', 'MySQLdb', 'dbus', 'matplotlib', 'bottle',
+            'OpenSSL', 'tinydb'
+    ]:
         try:
             version = __import__(module).__version__
         except AttributeError:

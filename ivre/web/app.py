@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -138,11 +138,13 @@ def get_nmap_base(dbase):
         fmt = 'json'
     else:
         fmt = request.params.get("format") or 'json'
-        if fmt not in set(['txt', 'json']):
+        if fmt not in set(['txt', 'json', 'ndjson']):
             fmt = 'txt'
     datesasstrings = request.params.get("datesasstrings")
     if fmt == 'txt':
         response.set_header('Content-Type', 'text/plain')
+    elif fmt == 'ndjson':
+        response.set_header('Content-Type', 'application/x-ndjson')
     else:
         response.set_header('Content-Type', 'application/javascript')
     if callback is None:
@@ -171,7 +173,7 @@ def get_nmap_action(subdb, action):
                              strings
     :query bool datesasstrings: to get dates as strings rather than as
                                timestamps
-    :query str format: "json" (the default) or "txt"
+    :query str format: "json" (the default), "ndjson" or "txt"
     :status 200: no error
     :status 400: invalid referer
     :>jsonarr object: results
@@ -193,10 +195,11 @@ def get_nmap_action(subdb, action):
         if flt_params.ipsasnumbers:
             def r2res(r):
                 return [r2time(r), utils.ip2int(r['addr']),
-                        r['openports']['count']]
+                        r.get('openports', {}).get('count', 0)]
         else:
             def r2res(r):
-                return [r2time(r), r['addr'], r['openports']['count']]
+                return [r2time(r), r['addr'],
+                        r.get('openports', {}).get('count', 0)]
     elif action == "coordinates":
         def r2res(r):
             return {
@@ -212,10 +215,11 @@ def get_nmap_action(subdb, action):
         result, count = subdb.get_open_port_count(flt_params.flt)
         if flt_params.ipsasnumbers:
             def r2res(r):
-                return [utils.ip2int(r['addr']), r['openports']['count']]
+                return [utils.ip2int(r['addr']),
+                        r.get('openports', {}).get('count', 0)]
         else:
             def r2res(r):
-                return [r['addr'], r['openports']['count']]
+                return [r['addr'], r.get('openports', {}).get('count', 0)]
     elif action == "ipsports":
         result, count = subdb.get_ips_ports(flt_params.flt)
         if flt_params.ipsasnumbers:
@@ -271,6 +275,11 @@ def get_nmap_action(subdb, action):
     if flt_params.fmt == "txt":
         for rec in result:
             yield "%s\n" % r2res(rec)
+        return
+
+    if flt_params.fmt == 'ndjson':
+        for rec in result:
+            yield "%s\n" % json.dumps(r2res(rec))
         return
 
     if flt_params.callback is not None:
@@ -338,6 +347,7 @@ def get_nmap_top(subdb, field):
                              strings
     :query bool datesasstrings: to get dates as strings rather than as
                                timestamps
+    :query str format: "json" (the default) or "ndjson"
     :status 200: no error
     :status 400: invalid referer
     :>jsonarr str label: field value
@@ -359,14 +369,19 @@ def get_nmap_top(subdb, field):
         except ValueError:
             field = '%s:%s' % (field, topnbr)
             topnbr = 15
+    cursor = subdb.topvalues(
+        field, flt=flt_params.flt, least=least, topnbr=topnbr,
+    )
+    if flt_params.fmt == 'ndjson':
+        for rec in cursor:
+            yield json.dumps({"label": rec['_id'], "value": rec['count']})
+        return
     if flt_params.callback is None:
         yield "[\n"
     else:
         yield "%s([\n" % flt_params.callback
     # hack to avoid a trailing comma
-    cursor = iter(subdb.topvalues(
-        field, flt=flt_params.flt, least=least, topnbr=topnbr,
-    ))
+    cursor = iter(cursor)
     try:
         rec = next(cursor)
     except StopIteration:
@@ -394,6 +409,7 @@ def get_nmap(subdb):
                              strings
     :query bool datesasstrings: to get dates as strings rather than as
                                timestamps
+    :query str format: "json" (the default) or "ndjson"
     :status 200: no error
     :status 400: invalid referer
     :>jsonarr object: results
@@ -432,7 +448,8 @@ def get_nmap(subdb):
 
     version_mismatch = {}
     if flt_params.callback is None:
-        yield "[\n"
+        if flt_params.fmt == 'json':
+            yield "[\n"
     else:
         yield "%s([\n" % flt_params.callback
     # XXX-WORKAROUND-PGSQL
@@ -474,8 +491,11 @@ def get_nmap(subdb):
                 else:
                     newaddresses.append({'addr': addr})
             rec['addresses']['mac'] = newaddresses
-        yield "%s\t%s" % ('' if i == 0 else ',\n',
-                          json.dumps(rec, default=utils.serialize))
+        if flt_params.fmt == 'ndjson':
+            yield "%s\n" % json.dumps(rec, default=utils.serialize)
+        else:
+            yield "%s\t%s" % ('' if i == 0 else ',\n',
+                              json.dumps(rec, default=utils.serialize))
         check = subdb.cmp_schema_version_host(rec)
         if check:
             version_mismatch[check] = version_mismatch.get(check, 0) + 1
@@ -483,7 +503,8 @@ def get_nmap(subdb):
         if flt_params.limit and i + 1 >= flt_params.limit:
             break
     if flt_params.callback is None:
-        yield "\n]\n"
+        if flt_params.fmt == 'json':
+            yield "\n]\n"
     else:
         yield "\n]);\n"
 

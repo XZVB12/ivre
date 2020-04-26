@@ -790,7 +790,7 @@ def hash_file(fname, hashtype="sha1"):
                 if exc.errno != errno.ENOENT:
                     raise
         result = hashlib.new(hashtype)
-        for data in iter(lambda: fdesc.read(1048576), ""):
+        for data in iter(lambda: fdesc.read(1048576), b""):
             result.update(data)
         return result.hexdigest()
 
@@ -992,6 +992,10 @@ def screenwords(imgdata):
             if size == 0:
                 break
             for word in line.split():
+                try:
+                    word = word.decode()
+                except UnicodeDecodeError:
+                    continue
                 if word not in words:
                     if len(word) <= size:
                         words.add(word)
@@ -1218,7 +1222,7 @@ def get_nmap_svc_fp(proto="tcp", probe="NULL"):
     return _NMAP_PROBES[proto][probe]
 
 
-def match_nmap_svc_fp(output, proto="tcp", probe="NULL"):
+def match_nmap_svc_fp(output, proto="tcp", probe="NULL", soft=False):
     """Take output from a given probe and return the closest nmap
     fingerprint."""
     softmatch = {}
@@ -1234,6 +1238,16 @@ def match_nmap_svc_fp(output, proto="tcp", probe="NULL"):
         for service, fingerprint in fingerprints:
             match = fingerprint['m'][0].search(output)
             if match is not None:
+                if probe == 'NULL' and service == 'landesk-rc':
+                    # This Nmap fingerprint sucks: it is just a size
+                    # check with a simple rule to exclude values
+                    # starting with HTTP, RTSP or SIP. This gives too
+                    # many false positive matches. According to a
+                    # comment, the values are supposed to be
+                    # random. Let's at least make sure it contains
+                    # enough different chars.
+                    if len(set(output)) < 100:
+                        continue
                 doc = softmatch if fingerprint['soft'] else result
                 doc['service_name'] = service
                 for elt, key in viewitems(NMAP_FINGERPRINT_IVRE_KEY):
@@ -1245,6 +1259,8 @@ def match_nmap_svc_fp(output, proto="tcp", probe="NULL"):
                             doc[key] = data
                 if not fingerprint['soft']:
                     return result
+    if softmatch and soft:
+        return dict(softmatch, soft=True)
     return softmatch
 
 
