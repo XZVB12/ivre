@@ -25,12 +25,7 @@ sub-module or script.
 
 
 import ast
-try:
-    import argparse
-    USE_ARGPARSE = True
-except ImportError:
-    import optparse
-    USE_ARGPARSE = False
+import argparse
 from bisect import bisect_left
 import bz2
 import codecs
@@ -49,6 +44,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import time
 
 
@@ -57,6 +53,8 @@ from future.utils import PY3, viewitems, viewvalues
 from past.builtins import basestring
 try:
     from OpenSSL import crypto as osslc
+    from cryptography.hazmat.primitives.serialization import \
+        Encoding, PublicFormat
 except ImportError:
     USE_PYOPENSSL = False
 else:
@@ -84,9 +82,11 @@ from ivre import config
 # seen, it seems that (1) is right.
 MAXVALLEN = 1000
 
+
 LOGGER = logging.getLogger("ivre")
 REGEXP_T = type(re.compile(''))
 HEX = re.compile('^[a-f0-9]+$', re.IGNORECASE)
+STRPTIME_SUPPORTS_TZ = (sys.version_info >= (3, 7))
 
 
 # IP address regexp, based on
@@ -208,8 +208,6 @@ def int2ip(ipint):
 
     """
     try:
-        if ipint > 0xffffffff:  # Python 2.6 would handle the overflow
-            raise struct.error()
         return socket.inet_ntoa(struct.pack('!I', ipint))
     except struct.error:
         return socket.inet_ntop(
@@ -819,10 +817,7 @@ config.DEBUG_DB) is True.
     MAX_WARNINGS_STORED = 100
 
     def __init__(self):
-        # Python 2.6: logging.Filter is an old-style class, super()
-        # cannot be used.
-        # super(LogFilter, self).__init__()
-        logging.Filter.__init__(self)
+        super(LogFilter, self).__init__()
         self.warnings = set()
 
     def filter(self, record):
@@ -845,62 +840,7 @@ LOGGER.addFilter(LogFilter())
 LOGGER.setLevel(1 if config.DEBUG or config.DEBUG_DB else 20)
 
 
-if USE_ARGPARSE:
-    def ArgparserParent():
-        return argparse.ArgumentParser(add_help=False)
-else:
-    class ArgparserParent(object):
-        """This is a stub to implement a parent-like behavior when
-        optparse has to be used.
-
-        """
-
-        def __init__(self):
-            self.args = []
-
-        def add_argument(self, *args, **kargs):
-            """Stores parent's arguments for latter (manual)
-            processing.
-
-            """
-            self.args.append((args, kargs))
-
-
-def create_argparser(description, extraargs=None):
-    """This function helps create a parser with either argparse (if it is
-    available) or optparse. This pattern exists because argparse does
-    not exist by default in Python 2.6.
-
-    `description` is used as the description argument of
-    argparse.ArgumentParser() or optparse.OptionParser().
-
-    This function returns a tuple corresponding to the parser and a
-    boolean (True iff argparse is used).
-
-    """
-    if USE_ARGPARSE:
-        return argparse.ArgumentParser(description=description), True
-    parser = optparse.OptionParser(description=description)
-    parser.parse_args_orig = parser.parse_args
-
-    def my_parse_args():
-        res = parser.parse_args_orig()
-        if extraargs is None:
-            if res[1]:
-                raise optparse.OptionError(
-                    'unrecognized arguments', res[1]
-                )
-            return None
-        res = parser.parse_args_orig()
-        res[0].ensure_value(extraargs, res[1])
-        return res[0]
-
-    parser.parse_args = my_parse_args
-    parser.add_argument = parser.add_option
-    return parser, False
-
-
-CLI_ARGPARSER = ArgparserParent()
+CLI_ARGPARSER = argparse.ArgumentParser(add_help=False)
 # DB
 CLI_ARGPARSER.add_argument('--init', '--purgedb', action='store_true',
                            help='Purge or create and initialize the database.')
@@ -925,14 +865,9 @@ CLI_ARGPARSER.add_argument('--distinct', metavar='FIELD',
                            'results, one per line.')
 CLI_ARGPARSER.add_argument('--json', action='store_true',
                            help='Output results as JSON documents.')
-if USE_ARGPARSE:
-    CLI_ARGPARSER.add_argument('--sort', metavar='FIELD / ~FIELD', nargs='+',
-                               help='Sort results according to FIELD; use '
-                               '~FIELD to reverse sort order.')
-else:
-    CLI_ARGPARSER.add_argument('--sort', metavar='FIELD / ~FIELD',
-                               help='Sort results according to FIELD; use '
-                               '~FIELD to reverse sort order.')
+CLI_ARGPARSER.add_argument('--sort', metavar='FIELD / ~FIELD', nargs='+',
+                           help='Sort results according to FIELD; use '
+                           '~FIELD to reverse sort order.')
 CLI_ARGPARSER.add_argument('--limit', type=int,
                            help='Ouput at most LIMIT results.')
 CLI_ARGPARSER.add_argument('--skip', type=int, help='Skip first SKIP results.')
@@ -1132,22 +1067,28 @@ def guess_srv_port(port1, port2, proto="tcp"):
 _NMAP_PROBES = {}
 _NMAP_PROBES_POPULATED = False
 _NMAP_CUR_PROBE = None
+_NAMP_CUR_FALLBACK = None
 
 
 def _read_nmap_probes():
-    global _NMAP_CUR_PROBE, _NMAP_PROBES_POPULATED
+    global _NMAP_CUR_PROBE, _NMAP_CUR_FALLBACK, _NMAP_PROBES_POPULATED
     _NMAP_CUR_PROBE = None
+    _NMAP_CUR_FALLBACK = None
 
     def parse_line(line):
-        global _NMAP_PROBES, _NMAP_CUR_PROBE
+        global _NMAP_PROBES, _NMAP_CUR_PROBE, _NMAP_CUR_FALLBACK
         if line.startswith(b'match '):
             line = line[6:]
             soft = False
         elif line.startswith(b'softmatch '):
             line = line[10:]
             soft = True
+        elif line.startswith(b'fallback '):
+            _NMAP_CUR_FALLBACK.append(line[9:].decode())
+            return
         elif line.startswith(b'Probe '):
             _NMAP_CUR_PROBE = []
+            _NMAP_CUR_FALLBACK = []
             proto, name, probe = line[6:].split(b' ', 2)
             if not (len(probe) >= 3 and probe[:2] == b'q|' and
                     probe[-1:] == b'|'):
@@ -1157,7 +1098,8 @@ def _read_nmap_probes():
                                          arbitrary_escapes=True)
             _NMAP_PROBES.setdefault(proto.lower().decode(),
                                     {})[name.decode()] = {
-                "probe": probe, "fp": _NMAP_CUR_PROBE
+                "probe": probe, "fp": _NMAP_CUR_PROBE,
+                "fallbacks": _NMAP_CUR_FALLBACK,
             }
             return
         else:
@@ -1206,12 +1148,12 @@ def _read_nmap_probes():
     try:
         with open(os.path.join(config.NMAP_SHARE_PATH, 'nmap-service-probes'),
                   'rb') as fdesc:
-            for l in fdesc:
-                parse_line(l[:-1])
+            for fline in fdesc:
+                parse_line(fline[:-1])
     except (AttributeError, TypeError, IOError):
         LOGGER.warning('Cannot read Nmap service fingerprint file.',
                        exc_info=True)
-    del _NMAP_CUR_PROBE
+    del _NMAP_CUR_PROBE, _NMAP_CUR_FALLBACK
     _NMAP_PROBES_POPULATED = True
 
 
@@ -1228,13 +1170,15 @@ def match_nmap_svc_fp(output, proto="tcp", probe="NULL", soft=False):
     softmatch = {}
     result = {}
     try:
-        fingerprints = get_nmap_svc_fp(
+        probe_data = get_nmap_svc_fp(
             proto=proto,
             probe=probe,
-        )['fp']
+        )
+        fingerprints = probe_data['fp']
     except KeyError:
         pass
     else:
+        fallbacks = probe_data.get('fallbacks')
         for service, fingerprint in fingerprints:
             match = fingerprint['m'][0].search(output)
             if match is not None:
@@ -1249,7 +1193,11 @@ def match_nmap_svc_fp(output, proto="tcp", probe="NULL", soft=False):
                     if len(set(output)) < 100:
                         continue
                 doc = softmatch if fingerprint['soft'] else result
-                doc['service_name'] = service
+                if service.startswith('ssl/'):
+                    doc['service_name'] = service[4:]
+                    doc['service_tunnel'] = 'ssl'
+                else:
+                    doc['service_name'] = service
                 for elt, key in viewitems(NMAP_FINGERPRINT_IVRE_KEY):
                     if elt in fingerprint:
                         data = nmap_svc_fp_format_data(
@@ -1259,6 +1207,28 @@ def match_nmap_svc_fp(output, proto="tcp", probe="NULL", soft=False):
                             doc[key] = data
                 if not fingerprint['soft']:
                     return result
+        if fallbacks:
+            for fallback in fallbacks:
+                # Hack: in Nmap fingerprint file, nothing specifies
+                # the protocol of the fallback probe. However, the
+                # same probe may exist with different
+                # protcols. Usually, the fallback probes use the same
+                # protocol than the original probe; the only
+                # exceptions so far are DNSStatusRequestTCP (fallback
+                # DNSStatusRequest) and DNSVersionBindReqTCP (fallback
+                # DNSVersionBindReq)
+                if proto == 'tcp' and fallback + 'TCP' == probe:
+                    fallback_result = match_nmap_svc_fp(output, proto='udp',
+                                                        probe=fallback,
+                                                        soft=soft)
+                else:
+                    fallback_result = match_nmap_svc_fp(output, proto=proto,
+                                                        probe=fallback,
+                                                        soft=soft)
+                if fallback_result.get('soft'):
+                    softmatch = fallback_result
+                else:
+                    return fallback_result
     if softmatch and soft:
         return dict(softmatch, soft=True)
     return softmatch
@@ -1405,7 +1375,7 @@ def mac2manuf(mac):
         pass
 
 
-# Nmap (and Bro) encoding & decoding
+# Nmap (and Zeek) encoding & decoding
 
 
 _REPRS = {b'\r': '\\r', b'\n': '\\n', b'\t': '\\t', b'\\': '\\\\'}
@@ -1567,11 +1537,7 @@ def tz_offset(timestamp=None):
         timestamp = time.time()
     utc_offset = (datetime.datetime.fromtimestamp(timestamp) -
                   datetime.datetime.utcfromtimestamp(timestamp))
-    try:
-        return int(utc_offset.total_seconds())
-    except AttributeError:
-        # total_seconds does not exist in Python 2.6
-        return utc_offset.seconds + utc_offset.days * 24 * 3600
+    return int(utc_offset.total_seconds())
 
 
 def datetime2utcdatetime(dtm):
@@ -1806,9 +1772,13 @@ _CERTINFOS = [
         b'\n *'
         b'Issuer: (?P<issuer>.*)'
         b'\n(?:.*\n)* *'
+        b'Not Before *: (?P<not_before>.*)'
+        b'\n(?:.*\n)* *'
+        b'Not After *: (?P<not_after>.*)'
+        b'\n(?:.*\n)* *'
         b'Subject: (?P<subject>.*)'
         b'\n(?:.*\n)* *'
-        b'Public Key Algorithm: (?P<pubkeyalgo>rsaEncryption)'
+        b'Public Key Algorithm: (?P<type>rsaEncryption)'
         b'\n *'
         b'(?:RSA )?Public-Key: \\((?P<bits>[0-9]+) bit\\)'
         b'\n *'
@@ -1821,16 +1791,26 @@ _CERTINFOS = [
         b'\n *'
         b'Issuer: (?P<issuer>.*)'
         b'\n(?:.*\n)* *'
+        b'Not Before *: (?P<not_before>.*)'
+        b'\n(?:.*\n)* *'
+        b'Not After *: (?P<not_after>.*)'
+        b'\n(?:.*\n)* *'
         b'Subject: (?P<subject>.*)'
         b'\n(?:.*\n)* *'
-        b'Public Key Algorithm: (?P<pubkeyalgo>.*)'
+        b'Public Key Algorithm: (?P<type>.*)'
         b'(?:\n|$)'
     ),
 ]
 
-_CERTINFOS_SAN = re.compile(
+_CERTINFOS_EXT_SAN = re.compile(
     b'\n *'
     b'X509v3 Subject Alternative Name: *(?:critical *)?\n *(?P<san>.*)'
+    b'(?:\n|$)'
+)
+
+_CERTINFOS_EXT_BC = re.compile(
+    b'\n *'
+    b'X509v3 Basic Constraints: *(?:critical *)?\n *(?P<bc>.*)'
     b'(?:\n|$)'
 )
 
@@ -1850,6 +1830,13 @@ _CERTALGOS = {
     408: 'id-ecPublicKey',
     116: 'id-dsa',
     28: 'dhpublicnumber',
+}
+
+_CERTKEYTYPES = {
+    6: 'rsa',
+    408: 'ec',
+    116: 'dsa',
+    28: 'dh',
 }
 
 PUBKEY_TYPES = {
@@ -1936,6 +1923,24 @@ text and a dict suitable for use by get_cert_info().
             dict(components))
 
 
+if STRPTIME_SUPPORTS_TZ:
+    def _parse_datetime(value):
+        try:
+            return datetime.datetime.strptime(value.decode(), '%Y%m%d%H%M%S%z')
+        except Exception:
+            LOGGER.warning('Cannot parse datetime value %r', value,
+                           exc_info=True)
+else:
+    def _parse_datetime(value):
+        try:
+            return datetime.datetime.strptime(value.decode()[:14],
+                                              '%Y%m%d%H%M%S')
+        except Exception:
+            LOGGER.warning('Cannot parse datetime value %r', value,
+                           exc_info=True)
+            return None
+
+
 def _get_cert_info_pyopenssl(cert):
     """Extract info from a certificate (hash values, issuer, subject,
     algorithm) in an handy-to-index-and-query form.
@@ -1955,20 +1960,44 @@ This version relies on the pyOpenSSL module.
         ext = cert.get_extension(i)
         if ext.get_short_name() == b'subjectAltName':
             try:
+                # XXX str() / encoding
                 result['san'] = [x.strip() for x in str(ext).split(', ')]
             except Exception:
                 LOGGER.warning('Cannot decode subjectAltName %r for %r', ext,
                                result['subject_text'], exc_info=True)
             break
+    result['self_signed'] = result['issuer_text'] == result['subject_text']
+    not_before = _parse_datetime(cert.get_notBefore())
+    not_after = _parse_datetime(cert.get_notAfter())
+    if not_before is not None:
+        result['not_before'] = not_before
+        if not_after is not None:
+            result['not_after'] = not_after
+            lifetime = not_after - not_before
+            try:
+                result['lifetime'] = int(lifetime.total_seconds())
+            except AttributeError:
+                # .total_seconds() does not exist in Python 2.6
+                result['lifetime'] = lifetime.days * 86400 + lifetime.seconds
+    elif not_after is not None:
+        result['not_after'] = not_after
+    result['pubkey'] = {}
     pubkey = cert.get_pubkey()
     pubkeytype = pubkey.type()
-    result['pubkeyalgo'] = _CERTALGOS.get(pubkeytype, pubkeytype)
-    result['bits'] = pubkey.bits()
+    result['pubkey']['type'] = _CERTKEYTYPES.get(pubkeytype, pubkeytype)
+    result['pubkey']['bits'] = pubkey.bits()
     if pubkeytype == 6:
         # RSA
         numbers = pubkey.to_cryptography_key().public_numbers()
-        result['exponent'] = numbers.e
-        result['modulus'] = str(numbers.n)
+        result['pubkey']['exponent'] = numbers.e
+        result['pubkey']['modulus'] = str(numbers.n)
+    pubkey = pubkey.to_cryptography_key().public_bytes(
+        Encoding.DER,
+        PublicFormat.SubjectPublicKeyInfo,
+    )
+    for hashtype in ['md5', 'sha1', 'sha256']:
+        result['pubkey'][hashtype] = hashlib.new(hashtype, pubkey).hexdigest()
+    result['pubkey']['raw'] = encode_b64(pubkey).decode()
     return result
 
 
@@ -1984,21 +2013,22 @@ and is a fallback when pyOpenSSL cannot be imported.
     for hashtype in ['md5', 'sha1', 'sha256']:
         result[hashtype] = hashlib.new(hashtype, cert).hexdigest()
     proc = subprocess.Popen([config.OPENSSL_CMD, 'x509', '-noout', '-text',
-                             '-inform', 'DER'], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE)
+                             '-inform', 'DER', '-pubkey'],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     proc.stdin.write(cert)
     proc.stdin.close()
-    data = proc.stdout.read()
+    data, pubkey = proc.stdout.read().split(b'-----BEGIN PUBLIC KEY-----')
     for expr in _CERTINFOS:
         match = expr.search(data)
         if match is not None:
             break
     else:
-        LOGGER.info("Cannot parse certificate %r - no matching expression",
-                    cert)
+        LOGGER.info("Cannot parse certificate %r - "
+                    "no matching expression in %r",
+                    cert, data)
         return result
-    try:
-        for field, fdata in viewitems(match.groupdict()):
+    for field, fdata in viewitems(match.groupdict()):
+        try:
             fdata = fdata.decode()
             if field in ['issuer', 'subject']:
                 fdata = [(_CERTKEYS.get(key, key), value)
@@ -2015,17 +2045,50 @@ and is a fallback when pyOpenSSL cannot be imported.
                                         .replace(' ', '')
                                         .replace(':', '')
                                         .replace('\n', ''), 16))
+            elif field in ['not_before', 'not_after']:
+                if STRPTIME_SUPPORTS_TZ:
+                    result[field] = datetime.datetime.strptime(
+                        fdata,
+                        '%b %d %H:%M:%S %Y %Z',
+                    )
+                else:
+                    result[field] = datetime.datetime.strptime(
+                        fdata[:-4],
+                        '%b %d %H:%M:%S %Y',
+                    )
             else:
                 result[field] = fdata
-    except Exception:
-        LOGGER.info("Cannot parse certificate %r", cert, exc_info=True)
-    san = _CERTINFOS_SAN.search(data)
+        except Exception:
+            LOGGER.info(
+                "Error when parsing certificate %r with field %r (value %r)",
+                cert, field, fdata, exc_info=True,
+            )
+    result['self_signed'] = result['issuer_text'] == result['subject_text']
+    if 'not_before' in result and 'not_after' in result:
+        lifetime = result['not_after'] - result['not_before']
+        try:
+            result['lifetime'] = int(lifetime.total_seconds())
+        except AttributeError:
+            # .total_seconds() does not exist in Python 2.6
+            result['lifetime'] = lifetime.days * 86400 + lifetime.seconds
+    san = _CERTINFOS_EXT_SAN.search(data)
     if san is not None:
         try:
             result['san'] = san.groups()[0].decode().split(', ')
         except Exception:
             LOGGER.info("Cannot parse subjectAltName in certificate %r", cert,
                         exc_info=True)
+    result['pubkey'] = {}
+    for fld in ['modulus', 'exponent', 'bits']:
+        if fld in result:
+            result['pubkey'][fld] = result.pop(fld)
+    if 'type' in result:
+        pubkeytype = result.pop('type')
+        result['pubkey']['type'] = PUBKEY_TYPES.get(pubkeytype, pubkeytype)
+    pubkey = decode_b64(b''.join(pubkey.splitlines()[1:-1]))
+    for hashtype in ['md5', 'sha1', 'sha256']:
+        result['pubkey'][hashtype] = hashlib.new(hashtype, pubkey).hexdigest()
+    result['pubkey']['raw'] = encode_b64(pubkey)
     return result
 
 

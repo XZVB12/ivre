@@ -52,11 +52,17 @@ from ivre import utils
 from ivre.xmlnmap import ALIASES_TABLE_ELEMS, Nmap2DB
 
 
+try:
+    EMPTY_QUERY = Query().noop()
+except TypeError:
+    EMPTY_QUERY = Query()
+
+
 class TinyDB(DB):
 
     """A DB using TinyDB backend"""
 
-    flt_empty = Query()
+    flt_empty = EMPTY_QUERY
     no_limit = None
 
     def __init__(self, url):
@@ -82,12 +88,19 @@ class TinyDB(DB):
             del self._db
 
     def init(self):
-        self.db.purge_tables()
+        try:
+            self.db.drop_tables()
+        except AttributeError:
+            # TinyDB < 4
+            self.db.purge_tables()
+
+    def get(self, *args, **kargs):
+        return list(self._get(*args, **kargs))
 
     def count(self, flt):
         return self.db.count(flt)
 
-    def get(self, flt, fields=None, sort=None, limit=None, skip=None):
+    def _db_get(self, flt, fields=None, sort=None, limit=None, skip=None):
         result = self.db.search(flt)
         if fields is not None:
 
@@ -400,7 +413,7 @@ This will be used by TinyDBNmap & TinyDBView
     """
 
     def _get(self, *args, **kargs):
-        for host in super(TinyDBActive, self).get(*args, **kargs):
+        for host in self._db_get(*args, **kargs):
             host = deepcopy(host)
             try:
                 host['addr'] = self.internal2ip(host['addr'])
@@ -413,6 +426,13 @@ This will be used by TinyDBNmap & TinyDBView
                     )
                 except (KeyError, socket.error):
                     pass
+                for script in port.get('scripts', []):
+                    for cert in script.get('ssl-cert', []):
+                        for fld in ['not_before', 'not_after']:
+                            try:
+                                cert[fld] = utils.all2datetime(cert[fld])
+                            except KeyError:
+                                pass
             for trace in host.get('traces', []):
                 for hop in trace.get('hops', []):
                     try:
@@ -425,9 +445,6 @@ This will be used by TinyDBNmap & TinyDBView
                 except KeyError:
                     pass
             yield host
-
-    def get(self, *args, **kargs):
-        return list(self._get(*args, **kargs))
 
     def store_host(self, host):
         host = deepcopy(host)
@@ -447,6 +464,17 @@ This will be used by TinyDBNmap & TinyDBView
                     )
                 except ValueError:
                     pass
+            for script in port.get('scripts', []):
+                for cert in script.get('ssl-cert', []):
+                    for fld in ['not_before', 'not_after']:
+                        if fld not in cert:
+                            continue
+                        if isinstance(cert[fld], datetime):
+                            cert[fld] = utils.datetime2timestamp(cert[fld])
+                        elif isinstance(cert[fld], basestring):
+                            cert[fld] = utils.datetime2timestamp(
+                                utils.all2datetime(cert[fld])
+                            )
         for trace in host.get('traces', []):
             for hop in trace.get('hops', []):
                 if 'ipaddr' in hop:
@@ -638,7 +666,10 @@ This will be used by TinyDBNmap & TinyDBView
     def searchservice(cls, srv, port=None, protocol=None):
         """Search an open port with a particular service."""
         q = Query()
-        flt = cls._searchstring_re(q.service_name, srv)
+        if srv is False:
+            flt = ~q.service_name.exists()
+        else:
+            flt = cls._searchstring_re(q.service_name, srv)
         if port is not None:
             flt &= (q.port == port)
         if protocol is not None:
@@ -656,11 +687,20 @@ This will be used by TinyDBNmap & TinyDBView
         q = Query()
         res = []
         if product is not None:
-            res.append(cls._searchstring_re(q.service_product, product))
+            if product is False:
+                res.append(~q.service_product.exists())
+            else:
+                res.append(cls._searchstring_re(q.service_product, product))
         if version is not None:
-            res.append(cls._searchstring_re(q.service_version, version))
+            if version is False:
+                res.append(~q.service_version.exists())
+            else:
+                res.append(cls._searchstring_re(q.service_version, version))
         if service is not None:
-            res.append(cls._searchstring_re(q.service_name, service))
+            if service is False:
+                res.append(~q.service_name.exists())
+            else:
+                res.append(cls._searchstring_re(q.service_name, service))
         if port is not None:
             res.append(q.port == port)
         if protocol is not None:
@@ -678,7 +718,7 @@ This will be used by TinyDBNmap & TinyDBView
             res.append(cls._searchstring_re(q.id, name))
         if output is not None:
             res.append(cls._searchstring_re(q.output, output))
-        if values is not None:
+        if values:
             if not isinstance(name, basestring):
                 raise TypeError(".searchscript() needs a `name` arg "
                                 "when using a `values` arg")
@@ -1811,7 +1851,11 @@ class TinyDBNmap(TinyDBActive, DBNmap):
 
     def init(self):
         super(TinyDBNmap, self).init()
-        self.db_scans.purge_tables()
+        try:
+            self.db_scans.drop_tables()
+        except AttributeError:
+            # TinyDB < 4
+            self.db_scans.purge_tables()
 
     def remove(self, rec):
         """Removes the record from the active column. `rec` must be the
@@ -1929,23 +1973,29 @@ returned to backend-agnostic functions.
                 rec[fld] = utils.all2datetime(rec[fld])
             except KeyError:
                 pass
-        if rec.get('recontype') == 'SSL_SERVER' and \
-           rec.get('source') == 'cert':
+        if (
+                rec.get('recontype') == 'SSL_SERVER' and
+                rec.get('source') in {'cert', 'cacert'}
+        ):
             rec['value'] = cls.from_binary(rec['value'])
         if isinstance(rec, Document):
             rec['_id'] = rec.doc_id
         return rec
 
     def _get(self, *args, **kargs):
-        for rec in super(TinyDBPassive, self).get(*args, **kargs):
+        for rec in self._db_get(*args, **kargs):
+            if (
+                    rec.get('recontype') == 'SSL_SERVER' and
+                    rec.get('source') in {'cert', 'cacert'}
+            ):
+                for fld in ['not_before', 'not_after']:
+                    try:
+                        rec['infos'][fld] = utils.all2datetime(
+                            rec['infos'][fld]
+                        )
+                    except KeyError:
+                        pass
             yield self.internal2rec(rec)
-
-    def get(self, *args, **kargs):
-        """Queries the passive column with the provided filter "spec", and
-returns a list of results.
-
-        """
-        return list(self._get(*args, **kargs))
 
     def get_one(self, *args, **kargs):
         """Same function as get, except the first record matching "spec" (or
@@ -2000,6 +2050,20 @@ None) is returned.
                     doc['infos'] = orig['infos']
                 except KeyError:
                     pass
+                if (
+                        doc['recontype'] == 'SSL_SERVER' and
+                        doc['source'] in {'cert', 'cacert'}
+                ):
+                    for fld in ['not_before', 'not_after']:
+                        if fld not in doc.get('infos', {}):
+                            continue
+                        info = doc['infos']
+                        if isinstance(info[fld], datetime):
+                            info[fld] = utils.datetime2timestamp(info[fld])
+                        elif isinstance(info[fld], basestring):
+                            info[fld] = utils.datetime2timestamp(
+                                utils.all2datetime(info[fld])
+                            )
                 # upsert() won't handle operations
             self.db.upsert(doc, spec_cond)
 
@@ -2185,7 +2249,10 @@ None) is returned.
     def searchservice(cls, srv, port=None, protocol=None):
         """Search a port with a particular service."""
         q = Query()
-        flt = cls._searchstring_re(q.infos.service_name, srv)
+        if srv is False:
+            flt = ~q.infos.service_name.exists()
+        else:
+            flt = cls._searchstring_re(q.infos.service_name, srv)
         if port is not None:
             flt &= q.port == port
         if protocol is not None and protocol != 'tcp':
@@ -2204,11 +2271,22 @@ None) is returned.
         q = Query()
         res = []
         if product is not None:
-            res.append(cls._searchstring_re(q.infos.service_product, product))
+            if product is False:
+                res.append(~q.infos.service_product.exists())
+            else:
+                res.append(cls._searchstring_re(q.infos.service_product,
+                                                product))
         if version is not None:
-            res.append(cls._searchstring_re(q.infos.service_version, version))
+            if version is False:
+                res.append(~q.infos.service_version.exists())
+            else:
+                res.append(cls._searchstring_re(q.infos.service_version,
+                                                version))
         if service is not None:
-            res.append(cls._searchstring_re(q.infos.service_name, service))
+            if service is False:
+                res.append(~q.infos.service_name.exists())
+            else:
+                res.append(cls._searchstring_re(q.infos.service_name, service))
         if port is not None:
             res.append(q.port == port)
         if protocol is not None:
@@ -2274,19 +2352,33 @@ None) is returned.
             res &= q.source.search('^%s-' % dnstype.upper())
         return res
 
-    @staticmethod
-    def searchcert(keytype=None, md5=None, sha1=None, sha256=None):
+    @classmethod
+    def searchcert(cls, keytype=None, md5=None, sha1=None, sha256=None,
+                   subject=None, issuer=None, self_signed=None,
+                   pkmd5=None, pksha1=None, pksha256=None, cacert=False):
         q = Query()
-        res = ((q.recontype == 'SSL_SERVER') & (q.source == 'cert'))
+        res = ((q.recontype == 'SSL_SERVER') &
+               (q.source == ('cacert' if cacert else 'cert')))
         if keytype is not None:
-            res &= (q.infos.pubkeyalgo == utils.PUBKEY_REV_TYPES.get(keytype,
-                                                                     keytype))
+            res &= (q.infos.pubkey.type == keytype)
         if md5 is not None:
-            res &= (q.infos.md5 == md5)
+            res &= cls._searchstring_re(q.infos.md5, md5)
         if sha1 is not None:
-            res &= (q.infos.sha1 == sha1)
+            res &= cls._searchstring_re(q.infos.sha1, sha1)
         if sha256 is not None:
-            res &= (q.infos.sha256 == sha256)
+            res &= cls._searchstring_re(q.infos.sha256, sha256)
+        if subject is not None:
+            res &= cls._searchstring_re(q.infos.subject_text, subject)
+        if issuer is not None:
+            res &= cls._searchstring_re(q.infos.issuer_text, issuer)
+        if self_signed is not None:
+            res &= (q.infos.self_signed == self_signed)
+        if pkmd5 is not None:
+            res &= cls._searchstring_re(q.infos.pubkey.md5, pkmd5)
+        if pksha1 is not None:
+            res &= cls._searchstring_re(q.infos.pubkey.sha1, pksha1)
+        if pksha256 is not None:
+            res &= cls._searchstring_re(q.infos.pubkey.sha256, pksha256)
         return res
 
     @classmethod
@@ -2332,21 +2424,6 @@ None) is returned.
         if keytype is None:
             return req
         return req & (q.infos.algo == 'ssh-' + keytype)
-
-    @classmethod
-    def searchcertsubject(cls, expr, issuer=None):
-        q = Query()
-        req = ((q.recontype == 'SSL_SERVER') & (q.source == 'cert') &
-               cls._searchstring_re(q.infos.subject_text, expr))
-        if issuer is None:
-            return req
-        return req & cls._searchstring_re(q.infos.issuer_text, expr)
-
-    @classmethod
-    def searchcertissuer(cls, expr):
-        q = Query()
-        return ((q.recontype == 'SSL_SERVER') & (q.source == 'cert') &
-                cls._searchstring_re(q.infos.issuer_text, expr))
 
     @staticmethod
     def searchbasicauth():
@@ -2439,8 +2516,14 @@ class TinyDBAgent(TinyDB, DBAgent):
 
     def init(self):
         super(TinyDBAgent, self).init()
-        self.db_scans.purge_tables()
-        self.db_masters.purge_tables()
+        try:
+            self.db_scans.drop_tables()
+        except AttributeError:
+            # TinyDB < 4
+            self.db_scans.purge_tables()
+            self.db_masters.purge_tables()
+        else:
+            self.db_masters.drop_tables()
 
     def _add_agent(self, agent):
         return self.db.insert(agent)
@@ -2460,7 +2543,7 @@ class TinyDBAgent(TinyDB, DBAgent):
 
     def get_agents(self):
         return (x.doc_id for x in
-                self.db.search(Query()))
+                self.db.search(self.flt_empty))
 
     def assign_agent(self, agentid, scanid,
                      only_if_unassigned=False,
@@ -2574,7 +2657,7 @@ scan object on success, and raises a LockError on failure.
 
     def get_scans(self):
         return (x.doc_id for x in
-                self.db_scans.search(Query()))
+                self.db_scans.search(self.flt_empty))
 
     def _update_scan_target(self, scanid, target):
         return self.db_scans.update({"target": target}, doc_ids=[scanid])
@@ -2590,7 +2673,7 @@ scan object on success, and raises a LockError on failure.
 
     def get_masters(self):
         return (x.doc_id for x in
-                self.db_masters.search(Query()))
+                self.db_masters.search(self.flt_empty))
 
 
 # TinyDB update operations
@@ -2932,7 +3015,7 @@ class TinyDBFlow(with_metaclass(DBFlowMeta, TinyDB, DBFlow)):
             raise ValueError(
                 "Unsupported orderby (should be 'src', 'dst' or 'flow')"
             )
-        for f in super(TinyDBFlow, self).get(flt, **kargs):
+        for f in self._db_get(flt, **kargs):
             f = deepcopy(f)
             f['_id'] = f.doc_id
             try:
@@ -2941,9 +3024,6 @@ class TinyDBFlow(with_metaclass(DBFlowMeta, TinyDB, DBFlow)):
             except KeyError:
                 pass
             yield f
-
-    def get(self, *args, **kargs):
-        return list(self._get(*args, **kargs))
 
     def count(self, flt):
         """
@@ -3091,7 +3171,6 @@ class TinyDBFlow(with_metaclass(DBFlowMeta, TinyDB, DBFlow)):
                     array_mode=clause['array_mode'],
                 )
         if clause['neg']:
-            # pylint: disable=invalid-unary-operand-type
             return ~res
         return res
 
@@ -3101,7 +3180,15 @@ class TinyDBFlow(with_metaclass(DBFlowMeta, TinyDB, DBFlow)):
 addresses.
 
         """
-        if clause['operator'] == 'regex':
+        if clause['len_mode']:
+            value = clause['value']
+            res = cls._base_from_attr(
+                clause['attr'],
+                op=lambda val: clause['operator'](val, value),
+                array_mode=clause['array_mode'],
+                len_mode=clause['len_mode'],
+            )
+        elif clause['operator'] == 'regex':
             res = cls._base_from_attr(
                 clause['attr'],
                 op=lambda val: val.search(clause['value']),
@@ -3138,7 +3225,7 @@ addresses.
         return res, cur + [subflts[-1]]
 
     @classmethod
-    def _base_from_attr(cls, attr, op, array_mode=None):
+    def _base_from_attr(cls, attr, op, array_mode=None, len_mode=False):
         array_fields, final_fields = cls._get_array_attrs(attr)
         final = Query()
         for subfld in final_fields:
@@ -3146,7 +3233,9 @@ addresses.
         if op == "exists":
             final = final.exists()
         elif attr in cls.list_fields:
-            if array_mode is None or array_mode.lower() == 'any':
+            if len_mode:
+                final = final.test(lambda vals: op(len(vals)))
+            elif array_mode is None or array_mode.lower() == 'any':
                 final = final.test(lambda vals: any(op(val) for val in vals))
             elif array_mode.lower() == 'all':
                 final = final.test(lambda vals: all(op(val) for val in vals))

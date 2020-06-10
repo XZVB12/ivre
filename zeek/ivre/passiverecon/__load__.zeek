@@ -1,5 +1,5 @@
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -22,6 +22,7 @@
 @load base/protocols/ftp
 @load base/protocols/pop3
 
+@load ./hassh
 @load ./ja3
 
 module PassiveRecon;
@@ -43,6 +44,8 @@ export {
         SSH_CLIENT_ALGOS,
         SSH_SERVER_ALGOS,
         SSH_SERVER_HOSTKEY,
+        SSH_CLIENT_HASSH,
+        SSH_SERVER_HASSH,
         SSL_CLIENT,
         SSL_SERVER,
         DNS_ANSWER,
@@ -148,7 +151,7 @@ event http_header(c: connection, is_orig: bool, name: string, value: string) {
             # While this is a header sent by the client,
             # it gives information about the server
             # if (name == "COOKIE")
-            # 	value = split1(value, /=/)[1];
+            #     value = split1(value, /=/)[1];
             Log::write(LOG, [$ts=c$start_time,
                              $uid=c$uid,
                              $host=c$id$resp_h,
@@ -227,6 +230,15 @@ event ssh_capabilities(c: connection, cookie: string, capabilities: SSH::Capabil
             $host=c$id$resp_h,
             $srvport=c$id$resp_p,
             $recon_type=SSH_SERVER_ALGOS,
+            $source="kex_algorithms",
+            $value=join_string_vec(capabilities$kex_algorithms, " ")
+        ]);
+        Log::write(LOG, [
+            $ts=c$start_time,
+            $uid=c$uid,
+            $host=c$id$resp_h,
+            $srvport=c$id$resp_p,
+            $recon_type=SSH_SERVER_ALGOS,
             $source="server_host_key_algorithms",
             $value=join_string_vec(capabilities$server_host_key_algorithms, " ")
         ]);
@@ -257,6 +269,15 @@ event ssh_capabilities(c: connection, cookie: string, capabilities: SSH::Capabil
             $source="compression_algorithms",
             $value=join_string_vec(capabilities$compression_algorithms$server_to_client, " ")
         ]);
+        if (c$ssh?$ivrehasshs) {
+            Log::write(LOG, [$ts=c$start_time,
+                             $uid=c$uid,
+                             $host=c$id$resp_h,
+                             $srvport=c$id$resp_p,
+                             $recon_type=SSH_SERVER_HASSH,
+                             $source=fmt("hassh-v%s", c$ssh$ivrehasshv),
+                             $value=c$ssh$ivrehasshs]);
+        }
     }
     else {
         Log::write(LOG, [
@@ -299,20 +320,46 @@ event ssh_capabilities(c: connection, cookie: string, capabilities: SSH::Capabil
             $source="compression_algorithms",
             $value=join_string_vec(capabilities$compression_algorithms$client_to_server, " ")
         ]);
+        if (c$ssh?$ivrehasshc) {
+            Log::write(LOG, [$ts=c$start_time,
+                             $uid=c$uid,
+                             $host=c$id$orig_h,
+                             $recon_type=SSH_CLIENT_HASSH,
+                             $source=fmt("hassh-v%s", c$ssh$ivrehasshv),
+                             $value=c$ssh$ivrehasshc]);
+        }
     }
 }
 
 event ssl_established(c: connection) {
-    if (c$ssl?$cert_chain && |c$ssl$cert_chain| > 0) {
-        Log::write(LOG, [
-            $ts=c$start_time,
-            $uid=c$uid,
-            $host=c$id$resp_h,
-            $srvport=c$id$resp_p,
-            $recon_type=SSL_SERVER,
-            $source="cert",
-            $value=encode_base64(x509_get_certificate_string(c$ssl$cert_chain[0]$x509$handle))
-        ]);
+    local cacert = F;
+    if (c$ssl?$cert_chain) {
+        for (i in c$ssl$cert_chain) {
+            Log::write(LOG, [
+                $ts=c$start_time,
+                $uid=c$uid,
+                $host=c$id$resp_h,
+                $srvport=c$id$resp_p,
+                $recon_type=SSL_SERVER,
+                $source=cacert ? "cacert" : "cert",
+                $value=encode_base64(x509_get_certificate_string(c$ssl$cert_chain[i]$x509$handle))
+            ]);
+            cacert = T;
+        }
+    }
+    if (c$ssl?$client_cert_chain) {
+        cacert = F;
+        for (i in c$ssl$client_cert_chain) {
+            Log::write(LOG, [
+                $ts=c$start_time,
+                $uid=c$uid,
+                $host=c$id$orig_h,
+                $recon_type=SSL_CLIENT,
+                $source=cacert ? "cacert" : "cert",
+                $value=encode_base64(x509_get_certificate_string(c$ssl$client_cert_chain[i]$x509$handle))
+            ]);
+            cacert = T;
+        }
     }
     if (c$ssl?$ivreja3c) {
         Log::write(LOG, [$ts=c$start_time,

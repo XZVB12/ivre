@@ -17,8 +17,8 @@
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
 
-"""
-This module implement tools to look for (public) keys in the database.
+"""This module implement tools to look for (public) keys in the
+database.
 
 """
 
@@ -82,8 +82,7 @@ class NmapKey(DBKey):
 
 
 class PassiveKey(DBKey):
-    """Base class for a key lookup tool specialized for the passive
-    (Bro) DB.
+    """Base class for a key lookup tool specialized for the passive DB.
 
     """
     def __init__(self, baseflt=None):
@@ -160,7 +159,7 @@ class SSLNmapKey(NmapKey, SSLKey):
 
 class SSLPassiveKey(PassiveKey, SSLKey):
     """Base class for the keys from SSL certificates within the passive
-    (Bro) DB.
+    DB.
 
     """
 
@@ -223,7 +222,7 @@ class SSHNmapKey(NmapKey, SSHKey):
 
 class SSHPassiveKey(PassiveKey, SSHKey):
     """Base class for the keys from SSH certificates within the passive
-    (Bro) DB.
+    DB.
 
     """
 
@@ -288,12 +287,13 @@ class SSLRsaNmapKey(SSLNmapKey, RSAKey):
 
     def getkeys(self, host):
         for script in self.getscripts(host):
-            key = script["script"][self.scriptid]['pubkey']
-            yield Key(host['addr'], script["port"], "ssl", key['type'],
-                      key['bits'],
-                      _rsa_construct(long(key['exponent']),
-                                     long(key['modulus'])),
-                      utils.decode_hex(script["script"][self.scriptid]['md5']))
+            for cert in script["script"].get(self.scriptid, []):
+                key = cert['pubkey']
+                yield Key(host['addr'], script["port"], "ssl", key['type'],
+                          key['bits'],
+                          _rsa_construct(long(key['exponent']),
+                                         long(key['modulus'])),
+                          utils.decode_hex(cert['md5']))
 
 
 class SSHRsaNmapKey(SSHNmapKey, RSAKey):
@@ -308,8 +308,7 @@ class SSHRsaNmapKey(SSHNmapKey, RSAKey):
 
 
 class SSLRsaPassiveKey(SSLPassiveKey, RSAKey):
-    """Tool for the RSA Keys from SSL certificates within the passive
-    (Bro) DB.
+    """Tool for the RSA Keys from SSL certificates within the passive DB.
 
     """
 

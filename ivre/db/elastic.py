@@ -1046,7 +1046,7 @@ return result;
                                 cls._get_pattern(output)}))
             else:
                 req.append(Q("match", **{"ports.scripts.output": output}))
-        if values is not None:
+        if values:
             if name is None:
                 raise TypeError(".searchscript() needs a `name` arg "
                                 "when using a `values` arg")
@@ -1087,6 +1087,8 @@ return result;
     @staticmethod
     def searchservice(srv, port=None, protocol=None):
         """Search an open port with a particular service."""
+        if srv is False:
+            res = ~Q('exists', field="ports.service_name")
         res = Q('match', ports__service_name=srv)
         if port is not None:
             res &= Q('match', ports__port=port)
@@ -1104,11 +1106,20 @@ return result;
         """
         res = []
         if product is not None:
-            res.append(Q('match', ports__service_product=product))
+            if product is False:
+                res.append(~Q('exists', field="ports.service_product"))
+            else:
+                res.append(Q('match', ports__service_product=product))
         if version is not None:
-            res.append(Q('match', ports__service_version=version))
+            if version is False:
+                res.append(~Q('exists', field="ports.service_version"))
+            else:
+                res.append(Q('match', ports__service_version=version))
         if service is not None:
-            res.append(Q('match', ports__service_name=service))
+            if service is False:
+                res.append(~Q('exists', field="ports.service_name"))
+            else:
+                res.append(Q('match', ports__service_name=service))
         if port is not None:
             res.append(Q('match', ports__port=port))
         if protocol is not None:

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -17,15 +17,11 @@
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
 
-"""
-This module is part of IVRE.
-Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+"""This sub-module contains functions used for passive recon.
 
-This sub-module contains functions used for passive recon.
 """
 
 
-from datetime import datetime
 import hashlib
 import re
 import struct
@@ -37,31 +33,7 @@ from future.utils import viewitems
 from ivre import utils, config
 
 
-SCHEMA_VERSION = 1
-
-# p0f specific
-
-P0F_MODES = {
-    'SYN': {
-        'options': [],
-        'name': 'SYN',
-        'filter': 'tcp and tcp[tcpflags] & (tcp-syn|tcp-ack) == 2'
-    },
-    'SYN+ACK': {
-        'options': ['-A'],
-        'name': 'SYN+ACK',
-        'filter': 'tcp and tcp[tcpflags] & (tcp-syn|tcp-ack) == 18'},
-    'RST+': {
-        'options': ['-R'],
-        'name': 'RST+',
-        'filter': 'tcp and tcp[tcpflags] & (tcp-rst) == 4'},
-    'ACK': {
-        'options': ['-O'],
-        'name': 'ACK',
-        'filter': 'tcp and tcp[tcpflags] & (tcp-syn|tcp-ack) == 16'}
-}
-
-P0F_DIST = re.compile(b'distance ([0-9]+),')
+SCHEMA_VERSION = 2
 
 DNSBL_START = re.compile(
     '^(?:'
@@ -74,42 +46,7 @@ DNSBL_START = re.compile(
 )
 
 
-def parse_p0f_line(line, include_port=False, sensor=None, recontype=None):
-    line = [line.split(b' - ')[0]] + line.split(b' - ')[1].split(b' -> ')
-    if line[1].startswith(b'UNKNOWN '):
-        sig = line[1][line[1].index(b'UNKNOWN ') + 8:][1:-1].split(b':')[:6]
-        osname, version, dist = b'?', b'?', -1
-    else:
-        sig = line[1][line[1].index(b' Signature: ') + 12:][
-            1:-1].split(b':')[:6]
-        if b' (up: ' in line[1]:
-            osname = line[1][:line[1].index(b' (up: ')]
-        else:
-            osname = line[1][:line[1].index(b' Signature: ')]
-        osname = osname.split(b' ')
-        osname, version = osname[0], b' '.join(osname[1:])
-        dist = int(P0F_DIST.search(line[2]).groups()[0])
-    # We wildcard any window size which is not Sxxx or Tyyy
-    if sig[0][0] not in b'ST':
-        sig[0] = b'*'
-    spec = {
-        'schema_version': SCHEMA_VERSION,
-        'addr': line[0][line[0].index(b'> ') + 2:line[0].index(b':')].decode(),
-        'distance': dist,
-        'value': osname.decode(),
-        'version': version.decode(),
-        'signature': ':'.join(elt.decode() for elt in sig),
-    }
-    if include_port:
-        spec.update({'port': int(line[0][line[0].index(b':') + 1:])})
-    if sensor is not None:
-        spec['sensor'] = sensor
-    if recontype is not None:
-        spec['recontype'] = recontype
-    return datetime.fromtimestamp(float(line[0][1:line[0].index(b'>')])), spec
-
-
-# Bro specific
+# Zeek specific
 
 SYMANTEC_UA = re.compile('[a-zA-Z0-9/+]{32,33}AAAAA$')
 SYMANTEC_SEP_UA = re.compile(
@@ -264,16 +201,6 @@ def _prepare_rec(spec, ignorenets, neverignore):
             elif authtype.lower() in ['negotiate', 'kerberos', 'oauth',
                                       'ntlm']:
                 spec['value'] = authtype
-    # p0f in Bro hack: we use the "source" field to provide the
-    # "distance" and "version" values
-    elif spec['recontype'] == 'P0F':
-        distance, version = spec.pop('source').split('-', 1)
-        try:
-            spec['distance'] = int(distance)
-        except ValueError:
-            pass
-        if version:
-            spec['version'] = version
     # TCP server banners: try to normalize data
     elif spec['recontype'] == 'TCP_SERVER_BANNER':
         newvalue = value = utils.nmap_decode_data(spec['value'])
@@ -296,6 +223,11 @@ def _prepare_rec(spec, ignorenets, neverignore):
                 "md5",
                 clientvalue.encode(),
             ).hexdigest()
+    # SSH_{CLIENT,SERVER}_HASSH
+    elif spec['recontype'] in ['SSH_CLIENT_HASSH', 'SSH_SERVER_HASSH']:
+        value = spec['value']
+        spec.setdefault('infos', {})['raw'] = value
+        spec['value'] = hashlib.new("md5", value.encode()).hexdigest()
     # Check DNS Blacklist answer
     elif spec['recontype'] == 'DNS_ANSWER':
         if any((spec.get('value') or "").endswith(dnsbl)
@@ -425,10 +357,10 @@ records.
 
     """
     source = spec.get('source')
-    if source == 'cert':
+    if source in {'cert', 'cacert'}:
         return _getinfos_cert(spec)
     if source.startswith('ja3-'):
-        return _getinfos_ja3(spec)
+        return _getinfos_ja3_hassh(spec)
     return {}
 
 
@@ -451,8 +383,8 @@ def _getinfos_cert(spec):
     return res
 
 
-def _getinfos_ja3(spec):
-    """Extract hashes from JA3 fingerprint strings.
+def _getinfos_ja3_hassh(spec):
+    """Extract hashes from JA3 & HASSH fingerprint strings.
 
     """
     value = spec['infos']['raw']
@@ -487,9 +419,14 @@ def _getinfos_tcp_srv_banner(spec):
     return _getinfos_from_banner(utils.nmap_decode_data(spec['value']))
 
 
-def _getinfos_ssh_server(spec):
+def _getinfos_ssh(spec):
     """Convert an SSH server banner to a TCP banner and use
-_getinfos_tcp_srv_banner()"""
+    _getinfos_tcp_srv_banner().
+
+    Since client and server banners are essentially the same thing, we
+    use this for both client and server banners.
+
+    """
     return _getinfos_from_banner(utils.nmap_decode_data(
         spec['value']
     ) + b'\r\n')
@@ -517,10 +454,13 @@ _GETINFOS_FUNCTIONS = {
     'DNS_ANSWER': _getinfos_dns,
     'DNS_BLACKLIST': _getinfos_dns_blacklist,
     'SSL_SERVER': _getinfos_sslsrv,
-    'SSL_CLIENT': {'ja3': _getinfos_ja3},
+    'SSL_CLIENT': {'ja3': _getinfos_ja3_hassh},
     'TCP_SERVER_BANNER': _getinfos_tcp_srv_banner,
-    'SSH_SERVER': _getinfos_ssh_server,
+    'SSH_CLIENT': _getinfos_ssh,
+    'SSH_SERVER': _getinfos_ssh,
     'SSH_SERVER_HOSTKEY': _getinfos_ssh_hostkey,
+    'SSH_CLIENT_HASSH': _getinfos_ja3_hassh,
+    'SSH_SERVER_HASSH': _getinfos_ja3_hassh,
 }
 
 
