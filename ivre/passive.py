@@ -54,7 +54,7 @@ SYMANTEC_SEP_UA = re.compile(
     '[A-F0-9]{12}\\},? SID/[0-9]+(?: SEQ/[0-9]+)?(.*)$'
 )
 KASPERSKY_UA = re.compile('AAAAA[a-zA-Z0-9_-]{1,2}AB$')
-DIGEST_AUTH_INFOS = re.compile('(username|realm|algorithm|qop)=')
+DIGEST_AUTH_INFOS = re.compile('(username|realm|algorithm|qop|domain)=')
 
 
 def _fix_mysql_banner(match):
@@ -180,10 +180,11 @@ def _prepare_rec(spec, ignorenets, neverignore):
     # try to recover the passwords, but on the other hand we store
     # specs with different challenges but the same username, realm,
     # host and sensor in the same records.
-    elif spec['recontype'] in ['HTTP_CLIENT_HEADER',
-                               'HTTP_CLIENT_HEADER_SERVER'] and \
-        spec.get('source') in ['AUTHORIZATION',
-                               'PROXY-AUTHORIZATION']:
+    elif (
+            spec['recontype'] in {'HTTP_CLIENT_HEADER',
+                                  'HTTP_CLIENT_HEADER_SERVER'} and
+            spec.get('source') in {'AUTHORIZATION', 'PROXY-AUTHORIZATION'}
+    ):
         value = spec['value']
         if value:
             authtype = value.split(None, 1)[0]
@@ -198,8 +199,29 @@ def _prepare_rec(spec, ignorenets, neverignore):
                 except Exception:
                     utils.LOGGER.warning("Cannot parse digest error for %r",
                                          spec, exc_info=True)
-            elif authtype.lower() in ['negotiate', 'kerberos', 'oauth',
-                                      'ntlm']:
+            elif authtype.lower() in {'negotiate', 'kerberos', 'oauth',
+                                      'ntlm'}:
+                spec['value'] = authtype
+    elif (
+            spec['recontype'] == 'HTTP_SERVER_HEADER' and
+            spec.get('source') in {'WWW-AUTHENTICATE', 'PROXY-AUTHENTICATE'}
+    ):
+        value = spec['value']
+        if value:
+            authtype = value.split(None, 1)[0]
+            if authtype.lower() == 'digest':
+                try:
+                    # we only keep relevant info
+                    spec['value'] = '%s %s' % (authtype, ','.join(
+                        val for val in
+                        _split_digest_auth(value[6:].strip())
+                        if DIGEST_AUTH_INFOS.match(val)
+                    ))
+                except Exception:
+                    utils.LOGGER.warning("Cannot parse digest error for %r",
+                                         spec, exc_info=True)
+            elif authtype.lower() in {'negotiate', 'kerberos', 'oauth',
+                                      'ntlm'}:
                 spec['value'] = authtype
     # TCP server banners: try to normalize data
     elif spec['recontype'] == 'TCP_SERVER_BANNER':
@@ -406,7 +428,11 @@ def _getinfos_ja3_hassh(spec):
 
 
 def _getinfos_from_banner(banner, proto="tcp", probe="NULL"):
-    infos = utils.match_nmap_svc_fp(banner, proto=proto, probe=probe)
+    infos = utils.match_nmap_svc_fp(banner, proto=proto, probe=probe) or {}
+    try:
+        del infos['cpe']
+    except KeyError:
+        pass
     if not infos:
         return {}
     return {'infos': infos}
@@ -442,6 +468,34 @@ def _getinfos_ssh_hostkey(spec):
     return {'infos': info}
 
 
+def _getinfos_ntlm(spec):
+    """
+    Get infos from the NTLMSSP_CHALLENGE matching the smb-os-discovery scripts
+    form Masscan and Nmap
+    """
+    return {'infos': {
+        k: (int(v)
+            if k == 'ntlm-version' else
+            utils.decode_b64(v.encode()).decode())
+        for k, v in (item.split(':', 1) for item in spec['value'].split(','))
+        if v
+    }}
+
+
+def _getinfos_smb(spec):
+    """
+    Get information on an OS from SMB `Session Setup Request` and
+    `Session Setup Response`
+    """
+    return {'infos': {
+        k: (v == "true"
+            if k == "is_guest" else
+            utils.decode_b64(v.encode()).decode())
+        for k, v in (item.split(':', 1) for item in spec['value'].split(','))
+        if v
+    }}
+
+
 _GETINFOS_FUNCTIONS = {
     'HTTP_CLIENT_HEADER':
     {'AUTHORIZATION': _getinfos_http_client_authorization,
@@ -454,13 +508,17 @@ _GETINFOS_FUNCTIONS = {
     'DNS_ANSWER': _getinfos_dns,
     'DNS_BLACKLIST': _getinfos_dns_blacklist,
     'SSL_SERVER': _getinfos_sslsrv,
-    'SSL_CLIENT': {'ja3': _getinfos_ja3_hassh},
+    'SSL_CLIENT': {'cacert': _getinfos_cert, 'cert': _getinfos_cert,
+                   'ja3': _getinfos_ja3_hassh},
     'TCP_SERVER_BANNER': _getinfos_tcp_srv_banner,
     'SSH_CLIENT': _getinfos_ssh,
     'SSH_SERVER': _getinfos_ssh,
     'SSH_SERVER_HOSTKEY': _getinfos_ssh_hostkey,
     'SSH_CLIENT_HASSH': _getinfos_ja3_hassh,
     'SSH_SERVER_HASSH': _getinfos_ja3_hassh,
+    'NTLM_CHALLENGE': _getinfos_ntlm,
+    'NTLM_AUTHENTICATE': _getinfos_ntlm,
+    'SMB': _getinfos_smb,
 }
 
 

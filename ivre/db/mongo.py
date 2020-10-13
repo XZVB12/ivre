@@ -39,6 +39,7 @@ except ImportError:
     from urllib import unquote
 import uuid
 
+
 import bson
 from future.builtins import bytes, range, zip
 from future.utils import viewitems, with_metaclass
@@ -46,6 +47,8 @@ from past.builtins import basestring
 from pymongo.errors import BulkWriteError
 import pymongo
 
+
+from ivre.active.data import ALIASES_TABLE_ELEMS
 from ivre.db import DB, DBActive, DBNmap, DBPassive, DBAgent, DBView, DBFlow, \
     DBFlowMeta, LockError
 from ivre import config, passive, utils, xmlnmap, flow
@@ -278,15 +281,13 @@ the default indexes.
 
     def create_indexes(self):
         for colnum, indexes in enumerate(self.indexes):
-            colname = self.columns[colnum]
-            for index in indexes:
-                self.db[colname].create_index(index[0], **index[1])
+            self.db[self.columns[colnum]].create_indexes([
+                pymongo.IndexModel(idx[0], **idx[1])
+                for idx in indexes
+            ])
 
     def ensure_indexes(self):
-        for colnum, indexes in enumerate(self.indexes):
-            colname = self.columns[colnum]
-            for index in indexes:
-                self.db[colname].ensure_index(index[0], **index[1])
+        return self.create_indexes()
 
     def _migrate_update_record(self, colname, recid, update):
         """Define how an update is handled. Purpose-specific subclasses may
@@ -729,6 +730,8 @@ class MongoDBActive(MongoDB, DBActive):
                 ('addr_0', pymongo.ASCENDING),
                 ('addr_1', pymongo.ASCENDING),
             ], {}),
+            ([('synack_honeypot', pymongo.ASCENDING)],
+             {"sparse": True}),
             ([('hostnames.domains', pymongo.ASCENDING)], {}),
             ([('traces.hops.domains', pymongo.ASCENDING)], {}),
             ([('openports.count', pymongo.ASCENDING)], {}),
@@ -746,6 +749,12 @@ class MongoDBActive(MongoDB, DBActive):
                 ('ports.service_version', pymongo.ASCENDING),
             ], {}),
             ([('ports.scripts.id', pymongo.ASCENDING)], {}),
+            ([('ports.scripts.http-headers.name', pymongo.ASCENDING),
+              ('ports.scripts.http-headers.value', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('ports.scripts.http-app.application', pymongo.ASCENDING),
+              ('ports.scripts.http-app.version', pymongo.ASCENDING)],
+             {"sparse": True}),
             ([('ports.scripts.ls.volumes.volume', pymongo.ASCENDING)],
              {"sparse": True}),
             ([('ports.scripts.ls.volumes.files.filename',
@@ -1144,7 +1153,7 @@ class MongoDBActive(MongoDB, DBActive):
         update = {"$set": {"schema_version": 6}}
         updated = False
         migrate_scripts = set(script for script, alias
-                              in viewitems(xmlnmap.ALIASES_TABLE_ELEMS)
+                              in viewitems(ALIASES_TABLE_ELEMS)
                               if alias == 'vulns')
         for port in doc.get('ports', []):
             for script in port.get('scripts', []):
@@ -1410,7 +1419,7 @@ field from having different data types.
                         script["ssh-hostkey"]
                     )
                     updated = True
-                elif (xmlnmap.ALIASES_TABLE_ELEMS.get(script['id']) == 'ls' and
+                elif (ALIASES_TABLE_ELEMS.get(script['id']) == 'ls' and
                       "ls" in script):
                     script[
                         "ls"
@@ -1757,7 +1766,12 @@ it is not expected)."""
                 "type": "Point",
                 "coordinates": host['infos'].pop('coordinates')[::-1],
             }
-        ident = self.db[self.columns[self.column_hosts]].insert(host)
+        try:
+            ident = self.db[self.columns[self.column_hosts]].insert(host)
+        except Exception:
+            utils.LOGGER.warning("Cannot insert host %r", host,
+                                 exc_info=True)
+            return None
         utils.LOGGER.debug("HOST STORED: %r in %r", ident,
                            self.columns[self.column_hosts])
         return ident
@@ -1783,7 +1797,15 @@ it is not expected)."""
         as returned by `.get()`.
 
         """
-        self.db[self.columns[self.column_hosts]].remove(spec_or_id=host['_id'])
+        self.db[self.columns[self.column_hosts]].delete_one(
+            {'_id': host['_id']}
+        )
+
+    def remove_many(self, flt):
+        """Removes hosts from the active column, based on the filter `flt`.
+
+        """
+        self.db[self.columns[self.column_hosts]].delete_many(flt)
 
     def store_or_merge_host(self, host):
         raise NotImplementedError
@@ -2139,7 +2161,7 @@ it is not expected)."""
             if not isinstance(name, basestring):
                 raise TypeError(".searchscript() needs a `name` arg "
                                 "when using a `values` arg")
-            key = xmlnmap.ALIASES_TABLE_ELEMS.get(name, name)
+            key = ALIASES_TABLE_ELEMS.get(name, name)
             if isinstance(values, (basestring, utils.REGEXP_T)):
                 req[key] = values
             else:
@@ -2462,6 +2484,7 @@ it is not expected)."""
             / script:host:<scriptid>
           - cert.* / smb.* / sshkey.* / ike.*
           - httphdr / httphdr.{name,value} / httphdr:<name>
+          - httpapp / httpapp:<name>
           - modbus.* / s7.* / enip.*
           - mongo.dbs.*
           - vulns.*
@@ -3074,7 +3097,7 @@ it is not expected)."""
             flt = self.flt_and(flt, self.searchscript(name="ike-info"))
             field = "ports.scripts.ike-info." + field[4:]
         elif field == 'httphdr':
-            flt = self.flt_and(flt, self.searchscript(name="http-headers"))
+            flt = self.flt_and(flt, self.searchhttphdr())
             specialproj = {"_id": 0, "ports.scripts.http-headers.name": 1,
                            "ports.scripts.http-headers.value": 1}
             specialflt = [{"$project": {
@@ -3090,13 +3113,11 @@ it is not expected)."""
                         '_id': tuple(x['_id'])}
             field = "ports.scripts.http-headers"
         elif field.startswith('httphdr.'):
-            flt = self.flt_and(flt, self.searchscript(name="http-headers"))
+            flt = self.flt_and(flt, self.searchhttphdr())
             field = "ports.scripts.http-headers.%s" % field[8:]
         elif field.startswith('httphdr:'):
             subfield = field[8:].lower()
-            flt = self.flt_and(flt,
-                               self.searchscript(name="http-headers",
-                                                 values={"name": subfield}))
+            flt = self.flt_and(flt, self.searchhttphdr(name=subfield))
             specialproj = {"_id": 0, "ports.scripts.http-headers.name": 1,
                            "ports.scripts.http-headers.value": 1}
             specialflt = [
@@ -3104,6 +3125,32 @@ it is not expected)."""
                             subfield}}
             ]
             field = "ports.scripts.http-headers.value"
+        elif field == 'httpapp':
+            flt = self.flt_and(flt, self.searchhttpapp())
+            specialproj = {"_id": 0, "ports.scripts.http-app.application": 1,
+                           "ports.scripts.http-app.version": 1}
+            specialflt = [{"$project": {
+                "_id": 0,
+                "ports.scripts.http-app": [
+                    "$ports.scripts.http-app.application",
+                    "$ports.scripts.http-app.version",
+                ],
+            }}]
+
+            def outputproc(x):
+                return {'count': x['count'],
+                        '_id': tuple(x['_id'])}
+            field = "ports.scripts.http-app"
+        elif field.startswith('httpapp:'):
+            subfield = field[8:]
+            flt = self.flt_and(flt, self.searchhttpapp(name=subfield))
+            specialproj = {"_id": 0, "ports.scripts.http-app.application": 1,
+                           "ports.scripts.http-app.version": 1}
+            specialflt = [
+                {"$match": {"ports.scripts.http-app.application":
+                            subfield}}
+            ]
+            field = "ports.scripts.http-app.version"
         elif field.startswith('modbus.'):
             flt = self.flt_and(flt, self.searchscript(name="modbus-discover"))
             field = 'ports.scripts.modbus-discover.' + field[7:]
@@ -3368,8 +3415,25 @@ record is also removed.
         for scanid in self.getscanids(host):
             if self.find_one(self.columns[self.column_hosts],
                              {'scanid': scanid}) is None:
-                self.db[self.columns[self.column_scans]].remove(
-                    spec_or_id=scanid
+                self.db[self.columns[self.column_scans]].delete_one(
+                    {'_id': scanid}
+                )
+
+    def remove_many(self, flt):
+        """Removes hosts from the active column, based on the filter `flt`.
+
+If the hosts removed had `scanid` attributes, and if some of them
+refer to scans that have no more host record after the deletion of the
+hosts, then the scan records are also removed.
+
+        """
+        scanids = list(self.distinct('scanid', flt=flt))
+        super(MongoDBNmap, self).remove_many(flt)
+        for scanid in scanids:
+            if self.find_one(self.columns[self.column_hosts],
+                             {'scanid': scanid}) is None:
+                self.db[self.columns[self.column_scans]].delete_one(
+                    {'_id': scanid}
                 )
 
 
@@ -4404,7 +4468,7 @@ class MongoDBFlow(with_metaclass(DBFlowMeta, MongoDB, DBFlow)):
             ([('count', pymongo.ASCENDING)], {}),
             ([('cspkts', pymongo.ASCENDING)], {}),
             ([('scpkts', pymongo.ASCENDING)], {}),
-            ([('scbytes', pymongo.ASCENDING)], {}),
+            ([('csbytes', pymongo.ASCENDING)], {}),
             ([('scbytes', pymongo.ASCENDING)], {}),
         ],
     ]

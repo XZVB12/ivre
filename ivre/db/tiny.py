@@ -44,12 +44,13 @@ from tinydb.database import Document
 from tinydb.operations import add, increment
 
 
+from ivre.active.data import ALIASES_TABLE_ELEMS
 from ivre.db import DB, DBActive, DBAgent, DBNmap, DBPassive, DBView, DBFlow, \
     DBFlowMeta, LockError
 from ivre import config
 from ivre import flow
 from ivre import utils
-from ivre.xmlnmap import ALIASES_TABLE_ELEMS, Nmap2DB
+from ivre.xmlnmap import Nmap2DB
 
 
 try:
@@ -210,7 +211,11 @@ class TinyDB(DB):
                 fullfield = '%s.%s' % (base, field)
             else:
                 fullfield = field
-            if fullfield in cls.list_fields:
+            if fullfield in cls.list_fields or (
+                    # Hack: this field may or may not be a list (this
+                    # needs to be changed in a near future)
+                    fullfield == "scanid" and isinstance(record[field], list)
+            ):
                 for val in record[field]:
                     if countval is not None:
                         yield val, countval
@@ -279,13 +284,20 @@ class TinyDB(DB):
         ))
 
     def remove(self, rec):
-        """Removes the record from the active column. `rec` must be the
-        record as returned by `.get()` or the record id.
+        """Removes the record from the active column. `rec` must be the record
+as returned by `.get()` or the record id.
 
         """
         if isinstance(rec, dict):
             rec = rec['_id']
         self.db.remove(cond=Query()._id == rec)
+
+    def remove_many(self, flt):
+        """Removes the record from the active column. `flt` must be a valid
+filter.
+
+        """
+        self.db.remove(cond=flt)
 
     @staticmethod
     def str2id(string):
@@ -1009,6 +1021,7 @@ This will be used by TinyDBNmap & TinyDBView
             / script:host:<scriptid>
           - cert.* / smb.* / sshkey.* / ike.*
           - httphdr / httphdr.{name,value} / httphdr:<name>
+          - httpapp / httpapp:<name>
           - modbus.* / s7.* / enip.*
           - mongo.dbs.*
           - vulns.*
@@ -1621,7 +1634,7 @@ This will be used by TinyDBNmap & TinyDBView
         elif field == 'httphdr':
 
             def _newflt(field):
-                return self.searchscript(name="http-headers")
+                return self.searchhttphdr()
 
             def _extractor(flt, field):
                 for rec in self._get(
@@ -1635,12 +1648,14 @@ This will be used by TinyDBNmap & TinyDBView
                                        hdr.get("value"))
         elif field.startswith('httphdr.'):
             field = "ports.scripts.http-headers.%s" % field[8:]
+
+            def _newflt(field):
+                return self.searchhttphdr()
         elif field.startswith('httphdr:'):
             subfield = field[8:].lower()
 
             def _newflt(field):
-                return self.searchscript(name="http-headers",
-                                         values={"name": subfield})
+                return self.searchhttphdr(name=subfield)
 
             def _extractor(flt, field):
                 for rec in self._get(
@@ -1652,6 +1667,37 @@ This will be used by TinyDBNmap & TinyDBView
                             for hdr in script.get('http-headers', []):
                                 if hdr.get("name", "").lower() == subfield:
                                     yield hdr.get("value")
+        elif field == 'httpapp':
+
+            def _newflt(field):
+                return self.searchhttpapp()
+
+            def _extractor(flt, field):
+                for rec in self._get(
+                        flt, sort=sort, limit=limit, skip=skip,
+                        fields=["ports.scripts.http-app"],
+                ):
+                    for port in rec['ports']:
+                        for script in port.get('scripts', []):
+                            for app in script.get('http-app', []):
+                                yield (app.get("application"),
+                                       app.get("version"))
+        elif field.startswith('httpapp:'):
+            subfield = field[8:]
+
+            def _newflt(field):
+                return self.searchhttpapp(name=subfield)
+
+            def _extractor(flt, field):
+                for rec in self._get(
+                        flt, sort=sort, limit=limit, skip=skip,
+                        fields=["ports.scripts.http-app"],
+                ):
+                    for port in rec['ports']:
+                        for script in port.get('scripts', []):
+                            for app in script.get('http-headers', []):
+                                if app.get("application", "") == subfield:
+                                    yield app.get("version")
         elif field.startswith('modbus.'):
             field = 'ports.scripts.modbus-discover.' + field[7:]
         elif field.startswith('s7.'):
@@ -1858,8 +1904,8 @@ class TinyDBNmap(TinyDBActive, DBNmap):
             self.db_scans.purge_tables()
 
     def remove(self, rec):
-        """Removes the record from the active column. `rec` must be the
-        record as returned by `.get()` or the record id.
+        """Removes the record from the active column. `rec` must be the record
+as returned by `.get()` or the record id.
 
         """
         q = Query()
@@ -1873,6 +1919,20 @@ class TinyDBNmap(TinyDBActive, DBNmap):
         super(TinyDBNmap, self).remove(rec)
         for scanid in scanids:
             if not self.db.get(q.scanid.any([scanid])):
+                self.db_scans.remove(cond=Query()._id == scanid)
+
+    def remove_many(self, flt):
+        """Removes hosts from the active column, based on the filter `flt`.
+
+If the hosts removed had `scanid` attributes, and if some of them
+refer to scans that have no more host record after the deletion of the
+hosts, then the scan records are also removed.
+
+        """
+        scanids = list(self.distinct('scanid', flt=flt))
+        super(TinyDBNmap, self).remove_many(flt)
+        for scanid in scanids:
+            if not self.db.get(Query().scanid.any([scanid])):
                 self.db_scans.remove(cond=Query()._id == scanid)
 
     def store_or_merge_host(self, host):

@@ -27,14 +27,21 @@ import re
 
 
 from ivre import utils
-from ivre.xmlnmap import create_ssl_cert, create_http_ls
+from ivre.xmlnmap import add_cert_hostnames, add_hostname, cpe2dict, \
+    create_elasticsearch_service, create_http_ls, create_ssl_cert
 
 
 _EXPR_TITLE = re.compile('<title[^>]*>([^<]*)</title>', re.I)
-_EXPR_OWA_VERSION = re.compile('/owa/(?:auth/)?([0-9\\.]+)/')
+_EXPR_OWA_VERSION = re.compile('"/owa/(?:auth/)?((?:[0-9]+\\.)+[0-9]+)/')
+_EXPR_CENTREON_VERSION = re.compile(
+    re.escape('<td class="LoginInvitVersion"><br />') +
+    '\\s+((?:[0-9]+\\.)+[0-9]+)\\s+' + re.escape('</td>') + '|' +
+    re.escape('<span>') + '\\s+v\\.\\ ((?:[0-9]+\\.)+[0-9]+)\\s+' +
+    re.escape('</span>')
+)
 
 
-def zgrap_parser_http(data, addr):
+def zgrap_parser_http(data, hostrec):
     """This function handles data from `{"data": {"http": [...]}}`
 records. `data` should be the content, i.e. the `[...]`. It should
 consist of simple dictionary, that may contain a `"response"` key
@@ -87,9 +94,12 @@ The output is a port dict (i.e., the content of the "ports" key of an
             if info:
                 res.setdefault('scripts', []).append({
                     'id': 'ssl-cert',
-                    'output': "\n".join(output),
+                    'output': output,
                     'ssl-cert': info,
                 })
+                for cert in info:
+                    add_cert_hostnames(cert,
+                                       hostrec.setdefault('hostnames', []))
     if url:
         port = None
         if ':' in url.get('host', ''):
@@ -111,7 +121,7 @@ The output is a port dict (i.e., the content of the "ports" key of an
             # Due to an issue with ZGrab2 output, we cannot, for now,
             # process the content of the file. See
             # <https://github.com/zmap/zgrab2/issues/263>.
-            repository = '%s:%d%s' % (addr, port, url['path'][:-5])
+            repository = '%s:%d%s' % (hostrec['addr'], port, url['path'][:-5])
             res['port'] = port
             res.setdefault('scripts', []).append({
                 'id': 'http-git',
@@ -150,6 +160,41 @@ The output is a port dict (i.e., the content of the "ports" key of an
                               'version': version[0]}],
             })
             return res
+        if url.get('path').endswith('/centreon/'):
+            if resp.get('status_code') != 200:
+                return {}
+            if not resp.get('body'):
+                return {}
+            body = resp['body']
+            res['port'] = port
+            path = url['path']
+            match = _EXPR_TITLE.search(body)
+            if match is None:
+                return {}
+            if match.groups()[0] != "Centreon - IT & Network Monitoring":
+                return {}
+            match = _EXPR_CENTREON_VERSION.search(body)
+            if match is None:
+                version = None
+            else:
+                version = match.group(1) or match.group(2)
+            res.setdefault('scripts', []).append({
+                'id': 'http-app',
+                'output': 'Centreon: path %s%s' % (
+                    path,
+                    '' if version is None else (', version %s' % version),
+                ),
+                'http-app': [dict(
+                    {'path': path,
+                     'application': 'Centreon'},
+                    **({} if version is None else {'version': version})
+                )],
+            })
+            return res
+        if url.get('path') != '/':
+            utils.LOGGER.warning('URL path not supported yet: %s',
+                                 url.get('path'))
+            return {}
     elif req.get('tls_handshake') or req.get('tls_log'):
         # zgrab / zgrab2
         port = 443
@@ -193,6 +238,19 @@ The output is a port dict (i.e., the content of the "ports" key of an
                        b"\r\n\r\n")
     info = utils.match_nmap_svc_fp(banner, proto="tcp", probe="GetRequest")
     if info:
+        path = 'ports.port:%s' % port
+        cpes = hostrec.setdefault('cpes', {})
+        for cpe in info.pop('cpe', []):
+            if cpe not in cpes:
+                try:
+                    cpeobj = cpe2dict(cpe)
+                except ValueError:
+                    utils.LOGGER.warning("Invalid cpe format (%s)", cpe)
+                    continue
+                cpes[cpe] = cpeobj
+            else:
+                cpeobj = cpes[cpe]
+            cpeobj.setdefault('origins', set()).add(path)
         res.update(info)
     if resp.get('body'):
         body = resp['body']
@@ -210,6 +268,26 @@ The output is a port dict (i.e., the content of the "ports" key of an
         script_http_ls = create_http_ls(body, url=url)
         if script_http_ls is not None:
             res.setdefault('scripts', []).append(script_http_ls)
+        service_elasticsearch = create_elasticsearch_service(body)
+        if service_elasticsearch:
+            if 'hostname' in service_elasticsearch:
+                add_hostname(service_elasticsearch.pop('hostname'), 'service',
+                             hostrec.setdefault('hostnames', []))
+            # TODO: handle CPE values
+            for cpe in service_elasticsearch.pop('cpe', []):
+                path = 'ports.port:%s' % port
+                cpes = hostrec.setdefault('cpes', {})
+                if cpe not in cpes:
+                    try:
+                        cpeobj = cpe2dict(cpe)
+                    except ValueError:
+                        utils.LOGGER.warning("Invalid cpe format (%s)", cpe)
+                        continue
+                    cpes[cpe] = cpeobj
+                else:
+                    cpeobj = cpes[cpe]
+                cpeobj.setdefault('origins', set()).add(path)
+            res.update(service_elasticsearch)
     return res
 
 

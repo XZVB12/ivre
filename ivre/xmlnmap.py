@@ -24,6 +24,7 @@
 
 import datetime
 import hashlib
+import json
 import os
 import re
 import struct
@@ -41,8 +42,10 @@ from future.utils import viewitems, viewvalues
 from past.builtins import basestring
 
 
-from ivre import utils
+from ivre.active.data import ALIASES_TABLE_ELEMS, \
+    cleanup_synack_honeypot_host, create_ssl_output
 from ivre.analyzer import dicom, ike
+from ivre import utils
 
 
 SCHEMA_VERSION = 18
@@ -50,93 +53,6 @@ SCHEMA_VERSION = 18
 # Scripts that mix elem/table tags with and without key attributes,
 # which is not supported for now
 IGNORE_TABLE_ELEMS = set(['xmpp-info', 'sslv2', 'sslv2-drown'])
-
-ALIASES_TABLE_ELEMS = {
-    # Use the same structured output for both ssl-cert and ssl-cacert
-    "ssl-cacert": "ssl-cert",
-    # ls unified output (ls NSE module + ftp-anon)
-    #   grep -lF 'ls.new_vol' * | sed 's#^#    "#;s#.nse$#": "ls",#'
-    "afp-ls": "ls",
-    "http-ls": "ls",
-    "nfs-ls": "ls",
-    "smb-ls": "ls",
-    #   + ftp-anon
-    "ftp-anon": "ls",
-    # vulns unified output (vulns NSE module)
-    #   grep -l -F vulns.Report * | sed 's#^#    "#;s#.nse$#": "vulns",#'
-    "afp-path-vuln": "vulns",
-    "clamav-exec": "vulns",
-    "distcc-cve2004-2687": "vulns",
-    "ftp-libopie": "vulns",
-    "ftp-vsftpd-backdoor": "vulns",
-    "ftp-vuln-cve2010-4221": "vulns",
-    "http-avaya-ipoffice-users": "vulns",
-    "http-cross-domain-policy": "vulns",
-    "http-dlink-backdoor": "vulns",
-    "http-frontpage-login": "vulns",
-    "http-huawei-hg5xx-vuln": "vulns",
-    "http-iis-short-name-brute": "vulns",
-    "http-method-tamper": "vulns",
-    "http-phpmyadmin-dir-traversal": "vulns",
-    "http-phpself-xss": "vulns",
-    "http-sap-netweaver-leak": "vulns",
-    "http-shellshock": "vulns",
-    "http-slowloris-check": "vulns",
-    "http-tplink-dir-traversal": "vulns",
-    "http-vuln-cve2006-3392": "vulns",
-    "http-vuln-cve2009-3960": "vulns",
-    "http-vuln-cve2010-2861": "vulns",
-    "http-vuln-cve2011-3192": "vulns",
-    "http-vuln-cve2011-3368": "vulns",
-    "http-vuln-cve2012-1823": "vulns",
-    "http-vuln-cve2013-0156": "vulns",
-    "http-vuln-cve2013-6786": "vulns",
-    "http-vuln-cve2013-7091": "vulns",
-    "http-vuln-cve2014-2126": "vulns",
-    "http-vuln-cve2014-2127": "vulns",
-    "http-vuln-cve2014-2128": "vulns",
-    "http-vuln-cve2014-2129": "vulns",
-    "http-vuln-cve2014-3704": "vulns",
-    "http-vuln-cve2014-8877": "vulns",
-    "http-vuln-cve2015-1427": "vulns",
-    "http-vuln-cve2015-1635": "vulns",
-    "http-vuln-cve2017-1001000": "vulns",
-    "http-vuln-cve2017-5638": "vulns",
-    "http-vuln-cve2017-5689": "vulns",
-    "http-vuln-cve2017-8917": "vulns",
-    "http-vuln-misfortune-cookie": "vulns",
-    "http-vuln-wnr1000-creds": "vulns",
-    "ipmi-cipher-zero": "vulns",
-    "mysql-vuln-cve2012-2122": "vulns",
-    "qconn-exec": "vulns",
-    "rdp-vuln-ms12-020": "vulns",
-    "realvnc-auth-bypass": "vulns",
-    "rmi-vuln-classloader": "vulns",
-    "rsa-vuln-roca": "vulns",
-    "samba-vuln-cve-2012-1182": "vulns",
-    "smb2-vuln-uptime": "vulns",
-    "smb-double-pulsar-backdoor": "vulns",
-    "smb-vuln-conficker": "vulns",
-    "smb-vuln-cve2009-3103": "vulns",
-    "smb-vuln-cve-2017-7494": "vulns",
-    "smb-vuln-ms06-025": "vulns",
-    "smb-vuln-ms07-029": "vulns",
-    "smb-vuln-ms08-067": "vulns",
-    "smb-vuln-ms10-054": "vulns",
-    "smb-vuln-ms10-061": "vulns",
-    "smb-vuln-ms17-010": "vulns",
-    "smb-vuln-regsvc-dos": "vulns",
-    "smb-vuln-webexec": "vulns",
-    "smtp-vuln-cve2011-1720": "vulns",
-    "smtp-vuln-cve2011-1764": "vulns",
-    "ssl-ccs-injection": "vulns",
-    "ssl-dh-params": "vulns",
-    "ssl-heartbleed": "vulns",
-    "ssl-poodle": "vulns",
-    "sslv2-drown": "vulns",
-    "supermicro-ipmi-conf": "vulns",
-    "tls-ticketbleed": "vulns",
-}
 
 SCREENSHOT_PATTERN = re.compile('^ *Saved to (.*)$', re.MULTILINE)
 RTSP_SCREENSHOT_PATTERN = re.compile('^ *Saved [^ ]* to (.*)$', re.MULTILINE)
@@ -1304,49 +1220,6 @@ def masscan_parse_s7info(data):
     return service_info, output_text, output_data
 
 
-def create_ssl_output(info):
-    out = []
-    for key, name in [('subject_text', 'Subject'),
-                      ('issuer_text', 'Issuer')]:
-        try:
-            out.append('%s: %s' % (name, info[key]))
-        except KeyError:
-            pass
-    try:
-        pubkey = info['pubkey']
-    except KeyError:
-        pass
-    else:
-        try:
-            out.append('Public Key type: %s' % pubkey['type'])
-        except KeyError:
-            pass
-        try:
-            out.append('Public Key bits: %d' % pubkey['bits'])
-        except KeyError:
-            pass
-    for key, name in [('not_before', 'Not valid before: '),
-                      ('not_after', 'Not valid after:  ')]:
-        try:
-            out.append('%s%s' % (name, info[key]))
-        except KeyError:
-            pass
-    for san in info.get('san', []):
-        out.append('Subject Alternative Name: %s' % san)
-    for key, name in [('md5', 'MD5:'), ('sha1', 'SHA-1:'),
-                      ('sha256', 'SHA-256:')]:
-        # NB: SHA-256 is not (yet) reported by Nmap, but it might help.
-        try:
-            out.append('%-7s%s' % (name, ' '.join(wrap(info[key], 4))))
-        except KeyError:
-            pass
-    try:
-        out.append(info['pem'])
-    except KeyError:
-        pass
-    return out
-
-
 def create_ssl_cert(data, b64encoded=True):
     """Produces an output similar to Nmap script ssl-cert from Masscan
 X509 "service" tag.
@@ -1365,8 +1238,7 @@ X509 "service" tag.
     pem.append('-----END CERTIFICATE-----')
     pem.append('')
     info['pem'] = '\n'.join(pem)
-    newout = create_ssl_output(info)
-    return newout, [info]
+    return '\n'.join(create_ssl_output(info)), [info]
 
 
 _EXPR_INDEX_OF = re.compile(
@@ -1420,6 +1292,67 @@ results.
         'id': 'http-ls', 'output': '\n'.join(output),
         'ls': {'volumes': [{'volume': volname, 'files': files}]},
     }
+
+
+def create_elasticsearch_service(data):
+    """Produces the service_* attributes from the (JSON) content of an
+HTTP response. Used for Zgrab and Masscan results.
+
+    """
+    try:
+        data = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if 'tagline' not in data:
+        if 'error' not in data:
+            return None
+        error = data['error']
+        if isinstance(error, str):
+            if (
+                    data.get('status') == 401 and
+                    error.startswith('AuthenticationException')
+            ):
+                return {'service_name': 'http',
+                        'service_product': 'Elasticsearch REST API',
+                        'service_extrainfo': 'Authentication required',
+                        'cpe': ['cpe:/a:elasticsearch:elasticsearch']}
+            return None
+        if not isinstance(error, dict):
+            return None
+        if not (data.get('status') == 401 or error.get('status') == 401):
+            return None
+        if 'root_cause' in error:
+            return {'service_name': 'http',
+                    'service_product': 'Elasticsearch REST API',
+                    'service_extrainfo': 'Authentication required',
+                    'cpe': ['cpe:/a:elasticsearch:elasticsearch']}
+        return None
+    if data['tagline'] != 'You Know, for Search':
+        return None
+    result = {'service_name': 'http',
+              'service_product': 'Elasticsearch REST API'}
+    cpe = []
+    if 'version' in data and 'number' in data['version']:
+        result['service_version'] = data['version']['number']
+        cpe.append('cpe:/a:elasticsearch:elasticsearch:%s' %
+                   data['version']['number'])
+    extrainfo = []
+    if 'name' in data:
+        extrainfo.append('name: %s' % data['name'])
+        result['hostname'] = data['name']
+    if 'cluster_name' in data:
+        extrainfo.append('cluster: %s' % data['cluster_name'])
+    if 'version' in data and 'lucene_version' in data['version']:
+        extrainfo.append('Lucene %s' % data['version']['lucene_version'])
+        cpe.append('cpe:/a:apache:lucene:%s' %
+                   data['version']['lucene_version'])
+    if extrainfo:
+        result['service_extrainfo'] = '; '.join(extrainfo)
+    if cpe:
+        result['cpe'] = cpe
+    return result
 
 
 def ignore_script(script):
@@ -1478,8 +1411,10 @@ def cpe2dict(cpe_str):
 
 
 # This is not a real hostname regexp, but a simple way to exclude
-# obviously wrong values.
-_HOSTNAME = re.compile('^[a-z0-9\\.\\*-]+$', re.I)
+# obviously wrong values. Underscores should not exist in (DNS)
+# hostnames, but since they happen to exist anyway, we allow them
+# here.
+_HOSTNAME = re.compile('^[a-z0-9_\\.\\*\\-]+$', re.I)
 
 
 def add_hostname(name, name_type, hostnames):
@@ -1497,6 +1432,20 @@ def add_hostname(name, name_type, hostnames):
         'name': name,
         'domains': list(utils.get_domains(name)),
     })
+
+
+def add_service_hostname(service_info, hostnames):
+    if 'service_hostname' not in service_info:
+        return
+    name = service_info['service_hostname']
+    if 'service_extrainfo' in service_info:
+        for data in service_info[
+                'service_extrainfo'
+        ].lower().split(', '):
+            if data.startswith('domain:'):
+                name += '.' + data[7:].strip()
+                break
+    add_hostname(name, 'service', hostnames)
 
 
 def add_cert_hostnames(cert, hostnames):
@@ -1582,8 +1531,11 @@ class NmapHandler(ContentHandler):
     def _pre_addhost(self):
         """Executed before _addhost for host object post-treatment"""
         if 'cpes' in self._curhost:
-            cpes = self._curhost['cpes']
-            self._curhost['cpes'] = list(viewvalues(cpes))
+            self._curhost['cpes'] = list(viewvalues(self._curhost['cpes']))
+            for cpe in self._curhost['cpes']:
+                cpe['origins'] = sorted(cpe['origins'])
+            if not self._curhost['cpes']:
+                del self._curhost['cpes']
 
     def _addhost(self):
         """Subclasses may store self._curhost here."""
@@ -1988,10 +1940,13 @@ argument (a dict object).
                         del match['soft']
                     except KeyError:
                         pass
+                    for cpe in match.pop('cpe', []):
+                        self._add_cpe_to_host(cpe=cpe)
                     self._curport.update(match)
-                    if 'service_hostname' in match:
-                        add_hostname(match['service_hostname'], 'service',
-                                     self._curhost.setdefault('hostnames', []))
+                    add_service_hostname(
+                        match,
+                        self._curhost.setdefault('hostnames', []),
+                    )
                 return
             for attr in attrs.keys():
                 self._curport['service_%s' % attr] = attrs[attr]
@@ -1999,6 +1954,8 @@ argument (a dict object).
                           'service_lowver', 'service_highver']:
                 if field in self._curport:
                     self._curport[field] = int(self._curport[field])
+            add_service_hostname(self._curport,
+                                 self._curhost.setdefault('hostnames', []))
         elif name == 'script':
             if self._curscript is not None:
                 utils.LOGGER.warning("self._curscript should be None at this "
@@ -2111,6 +2068,7 @@ argument (a dict object).
                     # hosts with an open port are marked as up by
                     # default (masscan)
                     self._curhost['state'] = 'up'
+                cleanup_synack_honeypot_host(self._curhost)
                 self._pre_addhost()
                 self._addhost()
             self._curhost = None
@@ -2230,7 +2188,7 @@ argument (a dict object).
                     if infos is not None:
                         self._curscript[infokey] = infos
             if key in POST_PROCESS:
-                POST_PROCESS[key](self._curhost, current, self._curscript)
+                POST_PROCESS[key](self._curscript, current, self._curhost)
             current.setdefault('scripts', []).append(self._curscript)
             self._curscript = None
         elif name in ['table', 'elem']:
@@ -2386,6 +2344,8 @@ argument (a dict object).
                                             proto=self._curport['protocol'],
                                             probe="NULL")
             if match:
+                for cpe in match.pop('cpe', []):
+                    self._add_cpe_to_host(cpe=cpe)
                 self._curport.update(match)
         # this requires a patched version of masscan
         for msgtype, msg in self._read_ssh_msgs(data[idx + 1:]):
@@ -2475,18 +2435,25 @@ argument (a dict object).
                                  exc_info=True)
             return
         if output_data:
-            script["output"] = "\n".join(output_text)
+            script["output"] = output_text
             script["ssl-cert"] = output_data
-            for cert in output_data:
-                add_cert_hostnames(cert,
-                                   self._curhost.setdefault('hostnames', []))
+            if script['id'] == 'ssl-cert':
+                for cert in output_data:
+                    add_cert_hostnames(
+                        cert,
+                        self._curhost.setdefault('hostnames', []),
+                    )
 
     def masscan_post_http(self, script):
         raw = self._from_binary(script['masscan']['raw'])
         self._curport['service_name'] = 'http'
-        self._curport.update(utils.match_nmap_svc_fp(
+        match = utils.match_nmap_svc_fp(
             raw, proto="tcp", probe="GetRequest",
-        ))
+        )
+        if match:
+            for cpe in match.pop('cpe', []):
+                self._add_cpe_to_host(cpe=cpe)
+        self._curport.update(match)
         try:
             script['http-headers'] = [
                 {
@@ -2527,17 +2494,26 @@ argument (a dict object).
         self._curport['service_name'] = 'http'
         raw = self._from_binary(script['masscan']['raw'])
         script_http_ls = create_http_ls(script['output'])
+        service_elasticsearch = create_elasticsearch_service(script['output'])
         script['output'] = utils.nmap_encode_data(raw)
         if script_http_ls:
             self._curport.setdefault('scripts', []).append(script_http_ls)
+        if service_elasticsearch:
+            if 'hostname' in service_elasticsearch:
+                add_hostname(service_elasticsearch.pop('hostname'), 'service',
+                             self._curhost.setdefault('hostnames', []))
+            for cpe in service_elasticsearch.pop('cpe', []):
+                self._add_cpe_to_host(cpe=cpe)
+            self._curport.update(service_elasticsearch)
 
-    def _add_cpe_to_host(self):
-        """Adds the cpe in self._curdata to the host-wide cpe list, taking
-        port/script/osmatch context into account.
+    def _add_cpe_to_host(self, cpe=None):
+        """Adds the cpe (from `cpe` or from self._curdata) to the host-wide
+        cpe list, taking port/script/osmatch context into account.
 
         """
-        cpe = self._curdata
-        self._curdata = None
+        if cpe is None:
+            cpe = self._curdata
+            self._curdata = None
         path = None
 
         # What is the path to reach this CPE?
@@ -2571,7 +2547,7 @@ argument (a dict object).
             cpes[cpe] = cpeobj
         else:
             cpeobj = cpes[cpe]
-        cpeobj.setdefault('origins', []).append(path)
+        cpeobj.setdefault('origins', set()).add(path)
 
     def characters(self, content):
         if self._curdata is not None:
