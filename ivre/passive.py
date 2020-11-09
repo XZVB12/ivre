@@ -25,12 +25,14 @@
 import hashlib
 import re
 import struct
+import binascii
 
 
 from future.utils import viewitems
 
 
 from ivre import utils, config
+from ivre.analyzer import ntlm
 
 
 SCHEMA_VERSION = 2
@@ -199,8 +201,17 @@ def _prepare_rec(spec, ignorenets, neverignore):
                 except Exception:
                     utils.LOGGER.warning("Cannot parse digest error for %r",
                                          spec, exc_info=True)
-            elif authtype.lower() in {'negotiate', 'kerberos', 'oauth',
-                                      'ntlm'}:
+            elif ntlm._is_ntlm_message(value):
+                # NTLM_NEGOTIATE and NTLM_AUTHENTICATE
+                try:
+                    auth = utils.decode_b64(value.split(None, 1)[1].encode())
+                except (UnicodeDecodeError, TypeError, ValueError,
+                        binascii.Error):
+                    pass
+                spec['value'] = "%s %s" % \
+                    (value.split(None, 1)[0],
+                     ntlm._ntlm_dict2string(ntlm.ntlm_extract_info(auth)))
+            elif authtype.lower() in {'negotiate', 'kerberos', 'oauth'}:
                 spec['value'] = authtype
     elif (
             spec['recontype'] == 'HTTP_SERVER_HEADER' and
@@ -220,8 +231,17 @@ def _prepare_rec(spec, ignorenets, neverignore):
                 except Exception:
                     utils.LOGGER.warning("Cannot parse digest error for %r",
                                          spec, exc_info=True)
-            elif authtype.lower() in {'negotiate', 'kerberos', 'oauth',
-                                      'ntlm'}:
+            elif ntlm._is_ntlm_message(value):
+                # NTLM_CHALLENGE
+                try:
+                    auth = utils.decode_b64(value.split(None, 1)[1].encode())
+                except (UnicodeDecodeError, TypeError, ValueError,
+                        binascii.Error):
+                    pass
+                spec['value'] = "%s %s" % \
+                    (value.split(None, 1)[0],
+                     ntlm._ntlm_dict2string(ntlm.ntlm_extract_info(auth)))
+            elif authtype.lower() in {'negotiate', 'kerberos', 'oauth'}:
                 spec['value'] = authtype
     # TCP server banners: try to normalize data
     elif spec['recontype'] == 'TCP_SERVER_BANNER':
@@ -302,6 +322,7 @@ def _getinfos_http_client_authorization(spec):
     """
     infos = {}
     data = spec['value'].split(None, 1)
+    value = spec['value']
     if data[1:]:
         if data[0].lower() == 'basic':
             try:
@@ -321,6 +342,10 @@ def _getinfos_http_client_authorization(spec):
                         infos[key] = value[1:-1]
             except Exception:
                 pass
+        elif (value[:4].lower() == 'ntlm' and value[4:].strip()) or \
+             (value[:9].lower() == 'negotiate' and value[9:].strip()):
+            spec['value'] = spec['value'].split(None, 1)[1]
+            return _getinfos_ntlm(spec)
     res = {}
     if infos:
         res['infos'] = infos
@@ -468,18 +493,46 @@ def _getinfos_ssh_hostkey(spec):
     return {'infos': info}
 
 
+def _getinfos_authentication(spec):
+    """
+    Parse value of *-AUTHENTICATE headers depending on the protocol used
+    """
+    value = spec['value']
+    if (value[:4].lower() == 'ntlm' and value[4:].strip()) or \
+       (value[:9].lower() == 'negotiate' and value[9:].strip()):
+        spec['value'] = spec['value'].split(None, 1)[1]
+        return _getinfos_ntlm(spec)
+
+    return {}
+
+
 def _getinfos_ntlm(spec):
     """
-    Get infos from the NTLMSSP_CHALLENGE matching the smb-os-discovery scripts
-    form Masscan and Nmap
+    Get information from NTLM_CHALLENGE and NTLM_AUTHENTICATE messages
     """
-    return {'infos': {
-        k: (int(v)
-            if k == 'ntlm-version' else
-            utils.decode_b64(v.encode()).decode())
-        for k, v in (item.split(':', 1) for item in spec['value'].split(','))
-        if v
-    }}
+    info = {}
+    try:
+        for k, v in (item.split(':', 1) for item in spec['value'].split(',')):
+            if k == 'NTLM_Version':
+                try:
+                    info[k] = int(v)
+                except ValueError:
+                    utils.LOGGER.warning(
+                        "Incorrect value for field %r in record %r", k, spec
+                    )
+            else:
+                try:
+                    info[k] = utils.decode_b64(v.encode()).decode()
+                except (UnicodeDecodeError, TypeError, ValueError,
+                        binascii.Error):
+                    utils.LOGGER.warning(
+                        "Incorrect value for field %r in record %r", k, spec
+                    )
+    except ValueError:
+        utils.LOGGER.warning("Incorrect value in message: %r", spec)
+        return {}
+
+    return {'infos': info}
 
 
 def _getinfos_smb(spec):
@@ -487,13 +540,29 @@ def _getinfos_smb(spec):
     Get information on an OS from SMB `Session Setup Request` and
     `Session Setup Response`
     """
-    return {'infos': {
-        k: (v == "true"
-            if k == "is_guest" else
-            utils.decode_b64(v.encode()).decode())
-        for k, v in (item.split(':', 1) for item in spec['value'].split(','))
-        if v
-    }}
+    info = {}
+    try:
+        for k, v in (item.split(':', 1) for item in spec['value'].split(',')):
+            if k == 'is_guest':
+                try:
+                    info[k] = v == 'true'
+                except ValueError:
+                    utils.LOGGER.warning(
+                        "Incorrect value for field %r in record %r", k, spec
+                    )
+            else:
+                try:
+                    info[k] = utils.decode_b64(v.encode()).decode()
+                except (UnicodeDecodeError, TypeError, ValueError,
+                        binascii.Error):
+                    utils.LOGGER.warning(
+                        "Incorrect value for field %r in record %r", k, spec
+                    )
+    except ValueError:
+        utils.LOGGER.warning("Incorrect value in message: %r", spec)
+        return {}
+
+    return {'infos': info}
 
 
 _GETINFOS_FUNCTIONS = {
@@ -504,7 +573,9 @@ _GETINFOS_FUNCTIONS = {
     {'AUTHORIZATION': _getinfos_http_client_authorization,
      'PROXY-AUTHORIZATION': _getinfos_http_client_authorization},
     'HTTP_SERVER_HEADER':
-    {'SERVER': _getinfos_http_server},
+    {'SERVER': _getinfos_http_server,
+     'WWW-AUTHENTICATE': _getinfos_authentication,
+     'PROXY-AUTHENTICATE': _getinfos_authentication},
     'DNS_ANSWER': _getinfos_dns,
     'DNS_BLACKLIST': _getinfos_dns_blacklist,
     'SSL_SERVER': _getinfos_sslsrv,

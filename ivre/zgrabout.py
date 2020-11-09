@@ -24,10 +24,14 @@
 
 from future.utils import viewitems
 import re
+import binascii
 
 
 from ivre import utils
-from ivre.xmlnmap import add_cert_hostnames, add_hostname, cpe2dict, \
+from ivre.analyzer import ntlm
+from ivre.active.cpe import add_cpe_values
+from ivre.active.data import handle_http_headers
+from ivre.xmlnmap import add_cert_hostnames, add_hostname, \
     create_elasticsearch_service, create_http_ls, create_ssl_cert
 
 
@@ -39,6 +43,10 @@ _EXPR_CENTREON_VERSION = re.compile(
     re.escape('<span>') + '\\s+v\\.\\ ((?:[0-9]+\\.)+[0-9]+)\\s+' +
     re.escape('</span>')
 )
+
+ntlm_values = ['Target_Name', 'NetBIOS_Domain_Name', 'NetBIOS_Computer_Name',
+               'DNS_Domain_Name', 'DNS_Computer_Name', 'DNS_Tree_Name',
+               'Product_Version', 'NTLM_Version']
 
 
 def zgrap_parser_http(data, hostrec):
@@ -207,13 +215,39 @@ The output is a port dict (i.e., the content of the "ports" key of an
               utils.nmap_decode_data(resp['status_line']) + b"\r\n")
     if resp.get('headers'):
         headers = resp['headers']
+        # Check the Authenticate header first: if we requested it with
+        # an Authorization header, we don't want to gather other information
+        if headers.get('www_authenticate'):
+            auths = headers.get('www_authenticate')
+            for auth in auths:
+                if ntlm._is_ntlm_message(auth):
+                    try:
+                        infos = ntlm.ntlm_extract_info(
+                            utils.decode_b64(auth.split(None, 1)[1].encode()))
+                    except (UnicodeDecodeError, TypeError, ValueError,
+                            binascii.Error):
+                        pass
+                    keyvals = zip(ntlm_values,
+                                  [infos.get(k) for k in ntlm_values])
+                    output = '\n'.join("{}: {}".format(k, v)
+                                       for k, v in keyvals if v)
+                    res.setdefault('scripts', []).append({
+                        'id': 'http-ntlm-info',
+                        'output': output,
+                        'ntlm-info': infos
+                    })
+                    if 'DNS_Computer_Name' in infos:
+                        add_hostname(infos['DNS_Computer_Name'], 'ntlm',
+                                     hostrec.setdefault('hostnames', []))
+        if any(val.lower().startswith('ntlm')
+               for val in req.get('headers', {}).get('authorization', [])):
+            return res
         # the order will be incorrect!
         line = '%s %s' % (resp['protocol']['name'], resp['status_line'])
         http_hdrs = [{'name': '_status', 'value': line}]
         output = [line]
-        if 'unknown' in headers:
-            for unk in headers.pop('unknown'):
-                headers[unk['key']] = unk['value']
+        for unk in headers.pop('unknown', []):
+            headers[unk['key']] = unk['value']
         for hdr, values in viewitems(headers):
             hdr = hdr.replace('_', '-')
             for val in values:
@@ -228,29 +262,16 @@ The output is a port dict (i.e., the content of the "ports" key of an
                 'id': 'http-headers', 'output': '\n'.join(output),
                 'http-headers': http_hdrs,
             })
+            handle_http_headers(hostrec, res, http_hdrs, path=url.get('path'))
         if headers.get('server'):
-            server = resp['headers']['server']
-            res.setdefault('scripts', []).append({
-                'id': 'http-server-header', 'output': server[0],
-                'http-server-header': server,
-            })
-            banner += (b"Server: " + utils.nmap_decode_data(server[0]) +
-                       b"\r\n\r\n")
+            banner += (
+                b"Server: " +
+                utils.nmap_decode_data(headers['server'][0]) +
+                b"\r\n\r\n"
+            )
     info = utils.match_nmap_svc_fp(banner, proto="tcp", probe="GetRequest")
     if info:
-        path = 'ports.port:%s' % port
-        cpes = hostrec.setdefault('cpes', {})
-        for cpe in info.pop('cpe', []):
-            if cpe not in cpes:
-                try:
-                    cpeobj = cpe2dict(cpe)
-                except ValueError:
-                    utils.LOGGER.warning("Invalid cpe format (%s)", cpe)
-                    continue
-                cpes[cpe] = cpeobj
-            else:
-                cpeobj = cpes[cpe]
-            cpeobj.setdefault('origins', set()).add(path)
+        add_cpe_values(hostrec, 'ports.port:%s' % port, info.pop('cpe', []))
         res.update(info)
     if resp.get('body'):
         body = resp['body']
@@ -273,20 +294,8 @@ The output is a port dict (i.e., the content of the "ports" key of an
             if 'hostname' in service_elasticsearch:
                 add_hostname(service_elasticsearch.pop('hostname'), 'service',
                              hostrec.setdefault('hostnames', []))
-            # TODO: handle CPE values
-            for cpe in service_elasticsearch.pop('cpe', []):
-                path = 'ports.port:%s' % port
-                cpes = hostrec.setdefault('cpes', {})
-                if cpe not in cpes:
-                    try:
-                        cpeobj = cpe2dict(cpe)
-                    except ValueError:
-                        utils.LOGGER.warning("Invalid cpe format (%s)", cpe)
-                        continue
-                    cpes[cpe] = cpeobj
-                else:
-                    cpeobj = cpes[cpe]
-                cpeobj.setdefault('origins', set()).add(path)
+            add_cpe_values(hostrec, 'ports.port:%s' % port,
+                           service_elasticsearch.pop('cpe', []))
             res.update(service_elasticsearch)
     return res
 
